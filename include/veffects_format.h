@@ -46,7 +46,7 @@ enum VfxScalar {
 };
 
 struct VfxData {
-    VfxHeader header;
+    VfxHeader header{};           // zero-initialized (frameCount = 0 until loaded)
     std::vector<float> scalars;   // frameCount * VFX_NSCALARS
     std::vector<float> bands;     // frameCount * bandCount
 

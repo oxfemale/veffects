@@ -151,7 +151,7 @@ struct Renderer {
         canvas.add_line = tramp_add_line; canvas.hsv = tramp_hsv;
     }
 
-    bool hasData() const { return data.header.frameCount > 0; }
+    bool hasData() const { return data.header.frameCount > 0 && !data.scalars.empty(); }
     void setData(VfxData&& d) {
         data = std::move(d);
         bandEnv.assign(data.header.bandCount, 0.f);
