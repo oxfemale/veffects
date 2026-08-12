@@ -20,7 +20,7 @@
 #pragma once
 #include <cstdint>
 
-#define VFX_PLUGIN_ABI 2
+#define VFX_PLUGIN_ABI 3
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,6 +48,12 @@ typedef struct VfxParams {
     const float* bands;         // bandCount smoothed band energies [0..1]
 
     int    width, height;       // frame dimensions
+
+    // Optional input image for image-driven scenes (loaded via the GUI "Open
+    // image" button or by dropping a jpg/png/bmp onto the window). NULL when no
+    // image is loaded. Pixels are row-major, 8-bit, imageChannels bytes each.
+    const unsigned char* image;
+    int    imageW, imageH, imageChannels;
 } VfxParams;
 
 // Canvas: buffer + primitives. impl is engine-internal, do not touch.

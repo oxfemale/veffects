@@ -12,6 +12,8 @@
 #define MINIMP3_IMPLEMENTATION
 #include "veffects_analyze.h"     // pulls in minimp3 + veffects_format.h
 #include "veffects_plugin.h"
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"            // jpg/png/bmp loading for image-driven scenes
 
 #include <cmath>
 #include <cstdio>
@@ -115,6 +117,21 @@ static void parallelRows(F&& f) {
     for (auto& t : th) t.join();
 }
 
+// ---- image loading (jpg/png/bmp -> forced RGB) ----
+static bool loadImageFile(const std::string& path, std::vector<unsigned char>& out, int& w, int& h) {
+    int ch = 0;
+    unsigned char* px = stbi_load(path.c_str(), &w, &h, &ch, 3);   // force 3 channels
+    if (!px) return false;
+    out.assign(px, px + (size_t)w * h * 3);
+    stbi_image_free(px);
+    return true;
+}
+static bool isImagePath(const std::string& p) {
+    std::string e = std::filesystem::path(p).extension().string();
+    for (auto& c : e) c = (char)tolower((unsigned char)c);
+    return e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".bmp";
+}
+
 // ---- plugin descriptor + canvas trampolines ----
 static void tramp_add_px  (const VfxCanvas*, int, int, float, float, float, float);
 static void tramp_add_glow(const VfxCanvas*, float, float, float, float, float, float, float);
@@ -143,6 +160,14 @@ struct Renderer {
     int frameNo = 0;
     VfxCanvas canvas{};
     std::vector<PluginHandle> plugins;
+
+    // optional input image (RGB) for image-driven scenes
+    std::vector<unsigned char> imgData;
+    int imgW = 0, imgH = 0, imgCh = 0;
+    void setImage(std::vector<unsigned char>&& d, int w, int h, int ch) {
+        imgData = std::move(d); imgW = w; imgH = h; imgCh = ch;
+    }
+    const unsigned char* imgPtr() const { return imgData.empty() ? nullptr : imgData.data(); }
 
     Renderer() : fb((size_t)W*H*3), resolve((size_t)W*H*3),
         bloomA((size_t)BW*BH*3), bloomB((size_t)BW*BH*3) {
@@ -203,6 +228,7 @@ struct Renderer {
         p.bpm = data.header.bpm; p.duration = data.header.duration; p.frameNo = frameNo;
         p.bandCount = (int)data.header.bandCount; p.bands = bandEnv.data();
         p.width = W; p.height = H;
+        p.image = imgPtr(); p.imageW = imgW; p.imageH = imgH; p.imageChannels = imgCh;
         return p;
     }
     void renderEntry(int idx, double t, double dt, float alpha) {
@@ -451,7 +477,7 @@ static void audioCB(void* ud, Uint8* stream, int len) {
 #endif
 
 int main(int argc, char** argv) {
-    std::string inPath, audioPath, sceneName;
+    std::string inPath, audioPath, sceneName, imagePath;
     bool renderMode = false, listScenes = false;
     int outFps = 30, forceScene = -1;
     double tStart = 0, tEnd = -1;
@@ -459,6 +485,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if      (a == "--render") renderMode = true;
+        else if (a == "--image"      && i + 1 < argc) imagePath = argv[++i];
         else if (a == "--audio"      && i + 1 < argc) audioPath = argv[++i];
         else if (a == "--fps"        && i + 1 < argc) outFps = atoi(argv[++i]);
         else if (a == "--start"      && i + 1 < argc) tStart = atof(argv[++i]);
@@ -485,6 +512,13 @@ int main(int argc, char** argv) {
         else fprintf(stderr, "warn: scene '%s' not found\n", sceneName.c_str());
     }
     R.forceScene = forceScene;
+
+    if (!imagePath.empty()) {
+        std::vector<unsigned char> px; int w, h;
+        if (loadImageFile(imagePath, px, w, h)) { R.setImage(std::move(px), w, h, 3);
+            fprintf(stderr, "image: %s (%dx%d)\n", imagePath.c_str(), w, h); }
+        else fprintf(stderr, "warn: cannot load image %s\n", imagePath.c_str());
+    }
 
     // ---- load initial track (mp3 -> analyze, or .veffects directly) ----
     VfxAudioPCM startPcm;
@@ -592,6 +626,7 @@ int main(int argc, char** argv) {
     double tManual = 0; bool paused = false;
     std::vector<uint8_t> rgb;
     std::string trackName = inPath.empty() ? "" : std::filesystem::path(inPath).filename().string();
+    std::string imageName = imagePath.empty() ? "" : std::filesystem::path(imagePath).filename().string();
     std::string status;
 
     // scene combo items
@@ -610,9 +645,20 @@ int main(int argc, char** argv) {
             ImGui_ImplSDL2_ProcessEvent(&e);
             ImGuiIO& io = ImGui::GetIO();
             if (e.type == SDL_QUIT) run = false;
-            if (e.type == SDL_DROPFILE) {                    // drag & drop an mp3
+            if (e.type == SDL_DROPFILE) {                    // drag & drop mp3 or image
                 char* f = e.drop.file;
-                if (f) { startLoad(f); status = "Analyzing..."; SDL_free(f); }
+                if (f) {
+                    std::string fp = f;
+                    if (isImagePath(fp)) {
+                        std::vector<unsigned char> px; int w, h;
+                        if (loadImageFile(fp, px, w, h)) {
+                            R.setImage(std::move(px), w, h, 3);
+                            imageName = std::filesystem::path(fp).filename().string();
+                            status.clear();
+                        } else status = "Cannot load image";
+                    } else { startLoad(fp); status = "Analyzing..."; }
+                    SDL_free(f);
+                }
             }
             if (e.type == SDL_KEYDOWN && !io.WantCaptureKeyboard) {
                 SDL_Keycode k = e.key.keysym.sym;
@@ -681,6 +727,20 @@ int main(int argc, char** argv) {
             }
             ImGui::SameLine();
             ImGui::TextDisabled("%s", trackName.empty() ? "(no track - drag an mp3 here)" : trackName.c_str());
+
+            if (ImGui::Button("Open image...")) {
+                const char* filt[4] = { "*.png", "*.jpg", "*.jpeg", "*.bmp" };
+                const char* f = tinyfd_openFileDialog("Open an image", "", 4, filt, "images", 0);
+                if (f) {
+                    std::vector<unsigned char> px; int w, h;
+                    if (loadImageFile(f, px, w, h)) {
+                        R.setImage(std::move(px), w, h, 3);
+                        imageName = std::filesystem::path(f).filename().string();
+                    }
+                }
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", imageName.empty() ? "(for image scenes)" : imageName.c_str());
 
             // scene dropdown
             if (!scenes.empty()) {

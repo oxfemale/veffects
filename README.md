@@ -8,10 +8,15 @@ Every scene is a hot-loadable **plugin**, so the visual style is fully extensibl
 ![build](../../actions/workflows/ci.yml/badge.svg)
 
 <p align="center">
-  <img src="docs/screenshots/ghost_in_the_shell.png" width="45%" alt="Ghost in the Shell scene">
-  <img src="docs/screenshots/blade_runner.png" width="45%" alt="Blade Runner scene"><br>
-  <img src="docs/screenshots/neuromancer.png" width="45%" alt="Neuromancer scene">
-  <img src="docs/screenshots/tachikoma.png" width="45%" alt="Tachikoma scene">
+  <img src="docs/screenshots/ghost_in_the_shell.png" width="32%" alt="Ghost in the Shell">
+  <img src="docs/screenshots/blade_runner.png" width="32%" alt="Blade Runner">
+  <img src="docs/screenshots/neuromancer.png" width="32%" alt="Neuromancer"><br>
+  <img src="docs/screenshots/data_network.png" width="32%" alt="Data Network">
+  <img src="docs/screenshots/dogs_by_the_river.png" width="32%" alt="Dogs by the River">
+  <img src="docs/screenshots/image_world_3d.png" width="32%" alt="Image World 3D"><br>
+  <img src="docs/screenshots/lego_city.png" width="32%" alt="Lego City">
+  <img src="docs/screenshots/microbes.png" width="32%" alt="Microbes">
+  <img src="docs/screenshots/nirvana.png" width="32%" alt="Nirvana">
 </p>
 
 ## Features
@@ -20,6 +25,9 @@ Every scene is a hot-loadable **plugin**, so the visual style is fully extensibl
 - A tiny custom **`.veffects`** score format (~9.6 KB/s) -- see [docs/FORMAT.md](docs/FORMAT.md).
 - **Plugin scenes** (`.dylib`/`.so`/`.dll`) discovered at runtime -- add your own by
   dropping a file in `plugins/`. See [docs/PLUGINS.md](docs/PLUGINS.md).
+- **Feed an image** (jpg/png/bmp) to generate a world from it: a 2D scene that
+  scatters the picture into music-reactive particles, and a 3D isometric voxel
+  world (brightness -> height, color -> tile) with an orbiting camera, Sims-style.
 - Cross-platform **Dear ImGui** control panel: Open, scene dropdown, a **Mute original
   audio** toggle (watch the visuals silently), transport, and drag-and-drop of an mp3.
 - Cinematic post-processing baked into the engine: bloom, chromatic aberration,
@@ -29,6 +37,8 @@ Every scene is a hot-loadable **plugin**, so the visual style is fully extensibl
 
 ## Bundled scenes
 
+**Themed worlds**
+
 | Scene | Look |
 |-------|------|
 | **Ghost in the Shell** | Green katakana digital rain, a wireframe cyber-skull in a HUD reticle, scanlines, beat glitch. |
@@ -36,6 +46,19 @@ Every scene is a hot-loadable **plugin**, so the visual style is fully extensibl
 | **Blade Runner** | Rain-soaked neon megacity: glowing billboards, sweeping searchlights, flying-car streaks. |
 | **Neuromancer** | Gibson's cyberspace: an endless data-grid flythrough with glowing wireframe constructs. |
 | **Nirvana** | Magenta glitch dreamscape: corrupted grid, datamosh tears, digital decay. |
+| **Lego City** | Bright daytime brick city on a studded baseplate; primary-color towers and minifigs. |
+| **Naruto** | A swirling Rasengan chakra orb, Uzumaki spiral, flying leaves and shuriken. |
+| **Death Note** | Gothic notebook writing itself in red, Shinigami eyes, a falling apple, rain. |
+| **Data Network** | A graph of routers and hosts with data packets streaming along the links. |
+| **Dogs by the River** | A wholesome meadow: sun, clouds, a shimmering river and trotting dogs. |
+| **Microbes** | A microscope view of translucent bacteria, flagella, dividing cells. |
+
+**Image-driven** (load an image first -- Open image, drag a file in, or `--image`)
+
+| Scene | Look |
+|-------|------|
+| **Photo Particles** | The image becomes a field of particles that scatter on beats and reform the picture (2D). |
+| **Image World 3D** | The image becomes an isometric voxel world -- brightness is height, color is tint (3D, Sims-like). |
 
 Scenes auto-crossfade over the track, or pick one from the dropdown (keys `1`-`9`,
 `0` = auto).
@@ -83,8 +106,9 @@ Outputs land in `build/bin/` (`veffects_gen`, `veffects_play`) and
 
 Then **Open mp3...** (or drag an mp3 onto the window). It analyzes the track and
 starts playing. Use the **Scene** dropdown to switch scenes and the **Mute original
-audio** checkbox to run the visuals without sound. `Space` pauses, `M` mutes,
-`Esc` quits.
+audio** checkbox to run the visuals without sound. For the image-driven scenes,
+click **Open image...** (or drop a jpg/png/bmp on the window), then pick *Photo
+Particles* or *Image World 3D*. `Space` pauses, `M` mutes, `Esc` quits.
 
 ### Command line
 
@@ -97,6 +121,9 @@ audio** checkbox to run the visuals without sound. `Space` pauses, `M` mutes,
 
 # or just hand the player the mp3 and let it analyze in-process
 ./build/bin/veffects_play track.mp3
+
+# build a world from an image
+./build/bin/veffects_play track.mp3 --image photo.jpg --scene-name "Image World 3D"
 ```
 
 ### Offline render to mp4

@@ -49,7 +49,8 @@ endif()
 # ---------------- shared include dirs ----------------
 set(VEFFECTS_INCLUDES
   "${CMAKE_SOURCE_DIR}/include"
-  "${CMAKE_SOURCE_DIR}/third_party/minimp3")
+  "${CMAKE_SOURCE_DIR}/third_party/minimp3"
+  "${CMAKE_SOURCE_DIR}/third_party/stb")
 
 # ---------------- analyzer CLI ----------------
 add_executable(veffects_gen src/veffects_gen.cpp)

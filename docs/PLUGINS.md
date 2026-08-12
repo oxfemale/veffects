@@ -68,6 +68,16 @@ when `p->alpha > 0.98`, so a crossfade doesn't corrupt the other scene.
 `bandCount` + `bands[]` (smoothed spectrum), `width`, `height`. All energies are
 `[0..1]`.
 
+### Optional input image
+
+If the user loaded an image (Open image / drag a jpg-png-bmp / `--image`), these
+are set (otherwise `image` is `NULL`):
+
+`image` (8-bit pixels, row-major), `imageW`, `imageH`, `imageChannels`.
+
+Sample it to build image-driven scenes -- see `plugins/photo_particles.cpp` (2D)
+and `plugins/image_world_3d.cpp` (3D isometric heightmap) for worked examples.
+
 ## Building a plugin
 
 With CMake, just drop the `.cpp` into `plugins/` and reconfigure -- every
