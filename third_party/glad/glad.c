@@ -1,0 +1,98 @@
+#include "glad.h"
+
+PFNGLCLEARPROC glad_glClear = NULL;
+PFNGLCLEARCOLORPROC glad_glClearColor = NULL;
+PFNGLVIEWPORTPROC glad_glViewport = NULL;
+PFNGLGENBUFFERSPROC glad_glGenBuffers = NULL;
+PFNGLBINDBUFFERPROC glad_glBindBuffer = NULL;
+PFNGLBUFFERDATAPROC glad_glBufferData = NULL;
+PFNGLDELETEBUFFERSPROC glad_glDeleteBuffers = NULL;
+PFNGLGENVERTEXARRAYSPROC glad_glGenVertexArrays = NULL;
+PFNGLBINDVERTEXARRAYPROC glad_glBindVertexArray = NULL;
+PFNGLDELETEVERTEXARRAYSPROC glad_glDeleteVertexArrays = NULL;
+PFNGLENABLEVERTEXATTRIBARRAYPROC glad_glEnableVertexAttribArray = NULL;
+PFNGLVERTEXATTRIBPOINTERPROC glad_glVertexAttribPointer = NULL;
+PFNGLCREATESHADERPROC glad_glCreateShader = NULL;
+PFNGLSHADERSOURCEPROC glad_glShaderSource = NULL;
+PFNGLCOMPILESHADERPROC glad_glCompileShader = NULL;
+PFNGLCREATEPROGRAMPROC glad_glCreateProgram = NULL;
+PFNGLATTACHSHADERPROC glad_glAttachShader = NULL;
+PFNGLLINKPROGRAMPROC glad_glLinkProgram = NULL;
+PFNGLUSEPROGRAMPROC glad_glUseProgram = NULL;
+PFNGLDELETESHADERPROC glad_glDeleteShader = NULL;
+PFNGLDELETEPROGRAMPROC glad_glDeleteProgram = NULL;
+PFNGLGETUNIFORMLOCATIONPROC glad_glGetUniformLocation = NULL;
+PFNGLUNIFORM1FPROC glad_glUniform1f = NULL;
+PFNGLUNIFORM2FPROC glad_glUniform2f = NULL;
+PFNGLUNIFORM3FPROC glad_glUniform3f = NULL;
+PFNGLUNIFORM4FPROC glad_glUniform4f = NULL;
+PFNGLUNIFORMMATRIX4FVPROC glad_glUniformMatrix4fv = NULL;
+PFNGLDRAWARRAYSPROC glad_glDrawArrays = NULL;
+PFNGLDRAWELEMENTSPROC glad_glDrawElements = NULL;
+PFNGLLINEWIDTHPROC glad_glLineWidth = NULL;
+PFNGLPOINTSIZEPROC glad_glPointSize = NULL;
+PFNGLREADPIXELSPROC glad_glReadPixels = NULL;
+PFNGLGENFRAMEBUFFERSPROC glad_glGenFramebuffers = NULL;
+PFNGLBINDFRAMEBUFFERPROC glad_glBindFramebuffer = NULL;
+PFNGLFRAMEBUFFERRENDERBUFFERPROC glad_glFramebufferRenderbuffer = NULL;
+PFNGLGENRENDERBUFFERSPROC glad_glGenRenderbuffers = NULL;
+PFNGLBINDRENDERBUFFERPROC glad_glBindRenderbuffer = NULL;
+PFNGLRENDERBUFFERSTORAGEPROC glad_glRenderbufferStorage = NULL;
+PFNGLGETSHADERIVPROC glad_glGetShaderiv = NULL;
+PFNGLGETPROGRAMIVPROC glad_glGetProgramiv = NULL;
+PFNGLGETSHADERINFOLOGPROC glad_glGetShaderInfoLog = NULL;
+PFNGLGETPROGRAMINFOLOGPROC glad_glGetProgramInfoLog = NULL;
+PFNGLDELETEFRAMEBUFFERSPROC glad_glDeleteFramebuffers = NULL;
+PFNGLDELETERENDERBUFFERSPROC glad_glDeleteRenderbuffers = NULL;
+
+static void *ve_gl_load(GLADloadproc load, const char *name) {
+    return load ? load(name) : NULL;
+}
+
+int gladLoadGLLoader(GLADloadproc load) {
+    glad_glClear = (PFNGLCLEARPROC)ve_gl_load(load, "glClear");
+    glad_glClearColor = (PFNGLCLEARCOLORPROC)ve_gl_load(load, "glClearColor");
+    glad_glViewport = (PFNGLVIEWPORTPROC)ve_gl_load(load, "glViewport");
+    glad_glGenBuffers = (PFNGLGENBUFFERSPROC)ve_gl_load(load, "glGenBuffers");
+    glad_glBindBuffer = (PFNGLBINDBUFFERPROC)ve_gl_load(load, "glBindBuffer");
+    glad_glBufferData = (PFNGLBUFFERDATAPROC)ve_gl_load(load, "glBufferData");
+    glad_glDeleteBuffers = (PFNGLDELETEBUFFERSPROC)ve_gl_load(load, "glDeleteBuffers");
+    glad_glGenVertexArrays = (PFNGLGENVERTEXARRAYSPROC)ve_gl_load(load, "glGenVertexArrays");
+    glad_glBindVertexArray = (PFNGLBINDVERTEXARRAYPROC)ve_gl_load(load, "glBindVertexArray");
+    glad_glDeleteVertexArrays = (PFNGLDELETEVERTEXARRAYSPROC)ve_gl_load(load, "glDeleteVertexArrays");
+    glad_glEnableVertexAttribArray = (PFNGLENABLEVERTEXATTRIBARRAYPROC)ve_gl_load(load, "glEnableVertexAttribArray");
+    glad_glVertexAttribPointer = (PFNGLVERTEXATTRIBPOINTERPROC)ve_gl_load(load, "glVertexAttribPointer");
+    glad_glCreateShader = (PFNGLCREATESHADERPROC)ve_gl_load(load, "glCreateShader");
+    glad_glShaderSource = (PFNGLSHADERSOURCEPROC)ve_gl_load(load, "glShaderSource");
+    glad_glCompileShader = (PFNGLCOMPILESHADERPROC)ve_gl_load(load, "glCompileShader");
+    glad_glCreateProgram = (PFNGLCREATEPROGRAMPROC)ve_gl_load(load, "glCreateProgram");
+    glad_glAttachShader = (PFNGLATTACHSHADERPROC)ve_gl_load(load, "glAttachShader");
+    glad_glLinkProgram = (PFNGLLINKPROGRAMPROC)ve_gl_load(load, "glLinkProgram");
+    glad_glUseProgram = (PFNGLUSEPROGRAMPROC)ve_gl_load(load, "glUseProgram");
+    glad_glDeleteShader = (PFNGLDELETESHADERPROC)ve_gl_load(load, "glDeleteShader");
+    glad_glDeleteProgram = (PFNGLDELETEPROGRAMPROC)ve_gl_load(load, "glDeleteProgram");
+    glad_glGetUniformLocation = (PFNGLGETUNIFORMLOCATIONPROC)ve_gl_load(load, "glGetUniformLocation");
+    glad_glUniform1f = (PFNGLUNIFORM1FPROC)ve_gl_load(load, "glUniform1f");
+    glad_glUniform2f = (PFNGLUNIFORM2FPROC)ve_gl_load(load, "glUniform2f");
+    glad_glUniform3f = (PFNGLUNIFORM3FPROC)ve_gl_load(load, "glUniform3f");
+    glad_glUniform4f = (PFNGLUNIFORM4FPROC)ve_gl_load(load, "glUniform4f");
+    glad_glUniformMatrix4fv = (PFNGLUNIFORMMATRIX4FVPROC)ve_gl_load(load, "glUniformMatrix4fv");
+    glad_glDrawArrays = (PFNGLDRAWARRAYSPROC)ve_gl_load(load, "glDrawArrays");
+    glad_glDrawElements = (PFNGLDRAWELEMENTSPROC)ve_gl_load(load, "glDrawElements");
+    glad_glLineWidth = (PFNGLLINEWIDTHPROC)ve_gl_load(load, "glLineWidth");
+    glad_glPointSize = (PFNGLPOINTSIZEPROC)ve_gl_load(load, "glPointSize");
+    glad_glReadPixels = (PFNGLREADPIXELSPROC)ve_gl_load(load, "glReadPixels");
+    glad_glGenFramebuffers = (PFNGLGENFRAMEBUFFERSPROC)ve_gl_load(load, "glGenFramebuffers");
+    glad_glBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC)ve_gl_load(load, "glBindFramebuffer");
+    glad_glFramebufferRenderbuffer = (PFNGLFRAMEBUFFERRENDERBUFFERPROC)ve_gl_load(load, "glFramebufferRenderbuffer");
+    glad_glGenRenderbuffers = (PFNGLGENRENDERBUFFERSPROC)ve_gl_load(load, "glGenRenderbuffers");
+    glad_glBindRenderbuffer = (PFNGLBINDRENDERBUFFERPROC)ve_gl_load(load, "glBindRenderbuffer");
+    glad_glRenderbufferStorage = (PFNGLRENDERBUFFERSTORAGEPROC)ve_gl_load(load, "glRenderbufferStorage");
+    glad_glGetShaderiv = (PFNGLGETSHADERIVPROC)ve_gl_load(load, "glGetShaderiv");
+    glad_glGetProgramiv = (PFNGLGETPROGRAMIVPROC)ve_gl_load(load, "glGetProgramiv");
+    glad_glGetShaderInfoLog = (PFNGLGETSHADERINFOLOGPROC)ve_gl_load(load, "glGetShaderInfoLog");
+    glad_glGetProgramInfoLog = (PFNGLGETPROGRAMINFOLOGPROC)ve_gl_load(load, "glGetProgramInfoLog");
+    glad_glDeleteFramebuffers = (PFNGLDELETEFRAMEBUFFERSPROC)ve_gl_load(load, "glDeleteFramebuffers");
+    glad_glDeleteRenderbuffers = (PFNGLDELETERENDERBUFFERSPROC)ve_gl_load(load, "glDeleteRenderbuffers");
+    return glad_glClear != NULL && glad_glViewport != NULL && glad_glCreateProgram != NULL;
+}
