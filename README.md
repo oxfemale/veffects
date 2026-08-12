@@ -29,7 +29,10 @@ Every scene is a hot-loadable **plugin**, so the visual style is fully extensibl
   scatters the picture into music-reactive particles, and a 3D isometric voxel
   world (brightness -> height, color -> tile) with an orbiting camera, Sims-style.
 - Cross-platform **Dear ImGui** control panel: Open, scene dropdown, a **Mute original
-  audio** toggle (watch the visuals silently), transport, and drag-and-drop of an mp3.
+  audio** toggle (watch the visuals silently), a **seek slider**, transport, and
+  drag-and-drop of an mp3.
+- One-click **Export to mp4** from the panel (renders the selected scene with audio
+  via ffmpeg), or headless `--export out.mp4`.
 - Cinematic post-processing baked into the engine: bloom, chromatic aberration,
   beat-driven camera shake, film grain.
 - Headless **offline render** mode that pipes raw frames to `ffmpeg` for an mp4.
@@ -52,6 +55,11 @@ Every scene is a hot-loadable **plugin**, so the visual style is fully extensibl
 | **Data Network** | A graph of routers and hosts with data packets streaming along the links. |
 | **Dogs by the River** | A wholesome meadow: sun, clouds, a shimmering river and trotting dogs. |
 | **Microbes** | A microscope view of translucent bacteria, flagella, dividing cells. |
+| **Akira** | Neo-Tokyo psychic blast: crackling energy sphere, shockwave, Kaneda's light-trail bike. |
+| **Tron** | The Grid: a neon perspective floor with cyan/orange light-cycle ribbon walls. |
+| **Matrix** | The iconic dense green code rain with bright white leaders and parallax depth. |
+| **Underwater** | A serene ocean: caustic light, fish schools, a jellyfish, swaying kelp, bubbles. |
+| **Spaceport** | A lit space station over a planet, docking beacons and ships on engine trails. |
 
 **Image-driven** (load an image first -- Open image, drag a file in, or `--image`)
 
@@ -108,7 +116,9 @@ Then **Open mp3...** (or drag an mp3 onto the window). It analyzes the track and
 starts playing. Use the **Scene** dropdown to switch scenes and the **Mute original
 audio** checkbox to run the visuals without sound. For the image-driven scenes,
 click **Open image...** (or drop a jpg/png/bmp on the window), then pick *Photo
-Particles* or *Image World 3D*. `Space` pauses, `M` mutes, `Esc` quits.
+Particles* or *Image World 3D*. Drag the **seek slider** to scrub, and **Export
+mp4...** renders the current scene (with audio) to a file via ffmpeg. `Space`
+pauses, `M` mutes, `Esc` quits.
 
 ### Command line
 

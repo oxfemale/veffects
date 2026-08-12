@@ -15,6 +15,14 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"            // jpg/png/bmp loading for image-driven scenes
 
+#if defined(_WIN32)
+  #define VFX_POPEN  _popen
+  #define VFX_PCLOSE _pclose
+#else
+  #define VFX_POPEN  popen
+  #define VFX_PCLOSE pclose
+#endif
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -476,8 +484,35 @@ static void audioCB(void* ud, Uint8* stream, int len) {
 }
 #endif
 
+// Render the whole track (one scene) to an mp4 via ffmpeg. Returns 1 ok, 2 no ffmpeg, 3 aborted.
+static int exportMp4(Renderer& R, const std::string& audio, const std::string& outPath,
+                     int sceneIdx, std::atomic<bool>* abort = nullptr,
+                     std::atomic<int>* progress = nullptr) {
+    if (!R.hasData()) return 2;
+    std::string cmd = "ffmpeg -y -loglevel error -f rawvideo -pix_fmt rgb24 -s 640x480 -r 30 -i - ";
+    bool ha = audio.size() > 4 && audio.substr(audio.size() - 4) == ".mp3";
+    if (ha) cmd += "-i \"" + audio + "\" ";
+    cmd += "-c:v libx264 -pix_fmt yuv420p ";
+    if (ha) cmd += "-c:a aac -shortest ";
+    cmd += "\"" + outPath + "\"";
+    FILE* pipe = VFX_POPEN(cmd.c_str(), "w");
+    if (!pipe) return 2;
+    int fps = 30, nF = (int)(R.data.header.duration * fps); double ddt = 1.0 / fps;
+    int saved = R.forceScene; R.forceScene = sceneIdx;
+    std::vector<uint8_t> buf;
+    for (int i = 0; i < nF; i++) {
+        if (abort && abort->load()) break;
+        R.frame(i * ddt, ddt); R.toRGB24(buf);
+        fwrite(buf.data(), 1, buf.size(), pipe);
+        if (progress && (i & 15) == 0) progress->store((int)(100.0 * i / std::max(nF, 1)));
+    }
+    R.forceScene = saved;
+    VFX_PCLOSE(pipe);
+    return (abort && abort->load()) ? 3 : 1;
+}
+
 int main(int argc, char** argv) {
-    std::string inPath, audioPath, sceneName, imagePath;
+    std::string inPath, audioPath, sceneName, imagePath, exportPath;
     bool renderMode = false, listScenes = false;
     int outFps = 30, forceScene = -1;
     double tStart = 0, tEnd = -1;
@@ -493,6 +528,7 @@ int main(int argc, char** argv) {
         else if (a == "--scene"      && i + 1 < argc) forceScene = atoi(argv[++i]);
         else if (a == "--scene-name" && i + 1 < argc) sceneName = argv[++i];
         else if (a == "--plugins"    && i + 1 < argc) pluginDirs.push_back(argv[++i]);
+        else if (a == "--export"     && i + 1 < argc) exportPath = argv[++i];
         else if (a == "--list-scenes") listScenes = true;
         else if (inPath.empty()) inPath = a;
     }
@@ -562,6 +598,15 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // ---- headless one-shot mp4 export (also used by the GUI Export button) ----
+    if (!exportPath.empty()) {
+        std::string audio = audioPath.empty() ? inPath : audioPath;
+        fprintf(stderr, "exporting %s ...\n", exportPath.c_str());
+        int r = exportMp4(R, audio, exportPath, forceScene);
+        if (r == 1) { fprintf(stderr, "saved %s\n", exportPath.c_str()); return 0; }
+        fprintf(stderr, "export failed (is ffmpeg on PATH?)\n"); return 1;
+    }
+
 #ifdef USE_SDL
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
         fprintf(stderr, "SDL error: %s\n", SDL_GetError()); return 1;
@@ -629,6 +674,28 @@ int main(int argc, char** argv) {
     std::string imageName = imagePath.empty() ? "" : std::filesystem::path(imagePath).filename().string();
     std::string status;
 
+    // ---- offline mp4 export (renders the selected scene through ffmpeg) ----
+    std::string audioSrc = audioPath.empty() ? inPath : audioPath;   // for muxing audio
+    std::string lastExportName;
+    std::atomic<bool> exporting{false}, abortExport{false};
+    std::atomic<int>  exportProgress{0}, exportResult{0};   // result: 0 none,1 saved,2 noffmpeg,3 aborted
+    std::thread exportTh;
+    auto startExport = [&](std::string outPath){
+        if (exporting.load() || !R.hasData()) return;
+        if (exportTh.joinable()) exportTh.join();
+        lastExportName = std::filesystem::path(outPath).filename().string();
+        abortExport.store(false); exportProgress.store(0); exportResult.store(0);
+        exporting.store(true);
+        int sceneForExport = R.forceScene;
+        std::string audio = audioSrc;
+        exportTh = std::thread([&, outPath, audio, sceneForExport]{
+            int r = exportMp4(R, audio, outPath, sceneForExport, &abortExport, &exportProgress);
+            exportProgress.store(100);
+            exportResult.store(r);
+            exporting.store(false);
+        });
+    };
+
     // scene combo items
     auto sceneItems = [&]{
         std::vector<std::string> v; v.push_back("Auto (cycle all)");
@@ -678,7 +745,7 @@ int main(int argc, char** argv) {
             if (job.th.joinable()) job.th.join();
             R.setData(std::move(job.data));
             openAudio(std::move(job.pcm));
-            trackName = job.name; status.clear(); paused = false;
+            trackName = job.name; audioSrc = job.path; status.clear(); paused = false;
             tManual = 0; t0 = SDL_GetPerformanceCounter();
             job.state.store(0);
         } else if (job.state.load() == 3) {
@@ -703,11 +770,22 @@ int main(int argc, char** argv) {
             if (R.hasData() && t > R.data.header.duration) { tManual = 0; t = 0; }
         }
 
+        // pick up a finished export result (set status on the main thread)
+        if (!exporting.load() && exportResult.load() != 0) {
+            int r = exportResult.exchange(0);
+            if (r == 1) status = "Saved " + lastExportName;
+            else if (r == 2) status = "Export failed: ffmpeg not found on PATH";
+            else if (r == 3) status = "Export aborted";
+        }
+
         // ---- render visualization to the streaming texture ----
+        // (skipped while exporting: the export thread owns the renderer then)
         double dt = 1.0 / 60.0;
-        R.frame(t, dt);
-        R.toRGB24(rgb);
-        SDL_UpdateTexture(tex, NULL, rgb.data(), W * 3);
+        if (!exporting.load()) {
+            R.frame(t, dt);
+            R.toRGB24(rgb);
+            SDL_UpdateTexture(tex, NULL, rgb.data(), W * 3);
+        }
 
         // ---- ImGui panel ----
         ImGui_ImplSDLRenderer2_NewFrame();
@@ -720,6 +798,7 @@ int main(int argc, char** argv) {
             ImGui::TextColored(ImVec4(0.3f, 0.85f, 0.95f, 1), "veffects");
             ImGui::SameLine(); ImGui::TextDisabled("music -> math visuals");
 
+            ImGui::BeginDisabled(exporting.load());   // lock controls while exporting
             if (ImGui::Button("Open mp3...")) {
                 const char* filt[1] = { "*.mp3" };
                 const char* f = tinyfd_openFileDialog("Open an mp3", "", 1, filt, "mp3 audio", 0);
@@ -760,6 +839,31 @@ int main(int argc, char** argv) {
             ImGui::Text("%02d:%05.2f / %02d:%05.2f", (int)t/60, fmod(t,60.0), (int)dur/60, fmod(dur,60.0));
             if (R.hasData() && R.data.header.bpm > 0) { ImGui::SameLine(); ImGui::TextDisabled("~%.0f BPM", R.data.header.bpm); }
 
+            // seek slider
+            if (R.hasData()) {
+                float tt = (float)t;
+                ImGui::SetNextItemWidth(240);
+                if (ImGui::SliderFloat("##seek", &tt, 0.f, (float)std::max(dur, 0.1), "%.1f s")) {
+                    if (actx.hasAudio.load()) actx.pos.store((size_t)((double)tt * actx.hz * actx.ch));
+                    else tManual = tt;
+                }
+            }
+            ImGui::EndDisabled();
+
+            // export
+            if (R.hasData()) {
+                if (exporting.load()) {
+                    ImGui::Text("Exporting... %d%%", exportProgress.load());
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel")) abortExport.store(true);
+                } else if (ImGui::Button("Export mp4...")) {
+                    const char* f = tinyfd_saveFileDialog("Export mp4", "veffects.mp4", 0, nullptr, nullptr);
+                    if (f) startExport(f);
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("(current scene, needs ffmpeg)");
+            }
+
             if (!status.empty()) ImGui::TextColored(ImVec4(1,0.7f,0.2f,1), "%s", status.c_str());
             ImGui::TextDisabled("keys: 1-9 scene, 0 auto, Space pause, M mute, Esc quit");
             ImGui::End();
@@ -779,6 +883,8 @@ int main(int argc, char** argv) {
         SDL_RenderPresent(ren);
     }
 
+    abortExport.store(true);
+    if (exportTh.joinable()) exportTh.join();
     if (job.th.joinable()) job.th.join();
     if (adev) SDL_CloseAudioDevice(adev);
     for (auto& h : R.plugins) if (h.destroy && h.state) h.destroy(h.state);
