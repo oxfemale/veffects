@@ -1,0 +1,62 @@
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+          - name: macos
+            os: macos-latest
+          - name: windows
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SDL2 (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
+
+      - name: Install SDL2 (macOS)
+        if: runner.os == 'macOS'
+        run: brew install sdl2
+
+      - name: Configure (Unix, system SDL2)
+        if: runner.os != 'Windows'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Configure (Windows, fetch & build SDL2)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -DVEFFECTS_FETCH_SDL=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Smoke test (list scenes)
+        if: runner.os != 'Windows'
+        run: ./build/bin/veffects_play --list-scenes
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        run: .\build\bin\veffects_play.exe --list-scenes
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: veffects-${{ matrix.name }}
+          path: |
+            build/bin/veffects_gen*
+            build/bin/veffects_play*
+            build/bin/plugins/*
+          if-no-files-found: warn

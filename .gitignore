@@ -1,0 +1,21 @@
+# build output
+/build/
+/build-*/
+*.o
+*.obj
+
+# generated visual scores and media
+*.veffects
+*.mp3
+*.mp4
+*.wav
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.user
+
+# ImGui runtime state
+imgui.ini

@@ -1,0 +1,735 @@
+// veffects_play -- cross-platform player / plugin host for .veffects visuals.
+//
+// The core is a pure host: it computes audio envelopes from the .veffects score,
+// hands them to the selected scene plugin (which draws into a shared HDR buffer),
+// then applies post-processing (bloom, chromatic aberration, beat shake, grain).
+// Every scene is a plugin (.dylib/.so/.dll) discovered in a plugins/ folder.
+//
+// GUI: Dear ImGui over SDL2 -- Open (native file dialog), scene dropdown,
+// a "Mute original audio" checkbox, and a transport bar. Opening an mp3 analyzes
+// it in-process and plays. There is also a headless --render mode for offline mp4.
+
+#define MINIMP3_IMPLEMENTATION
+#include "veffects_analyze.h"     // pulls in minimp3 + veffects_format.h
+#include "veffects_plugin.h"
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cctype>
+#include <vector>
+#include <string>
+#include <algorithm>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <filesystem>
+
+#ifdef USE_SDL
+  #include <SDL.h>
+  #include "imgui.h"
+  #include "imgui_impl_sdl2.h"
+  #include "imgui_impl_sdlrenderer2.h"
+  #include "tinyfiledialogs.h"
+#endif
+
+// ---- cross-platform dynamic library loading ----
+#if defined(_WIN32)
+  #include <windows.h>
+  static void* dynOpen(const char* p) { return (void*)LoadLibraryA(p); }
+  static void* dynSym(void* h, const char* n) { return (void*)GetProcAddress((HMODULE)h, n); }
+  static void  dynClose(void* h) { if (h) FreeLibrary((HMODULE)h); }
+  static const char* PLUGIN_EXT = ".dll";
+#else
+  #include <dlfcn.h>
+  static void* dynOpen(const char* p) { return dlopen(p, RTLD_NOW | RTLD_LOCAL); }
+  static void* dynSym(void* h, const char* n) { return dlsym(h, n); }
+  static void  dynClose(void* h) { if (h) dlclose(h); }
+  #if defined(__APPLE__)
+    static const char* PLUGIN_EXT = ".dylib";
+  #else
+    static const char* PLUGIN_EXT = ".so";
+  #endif
+#endif
+
+// ---- executable directory (for locating the plugins/ folder) ----
+#if defined(_WIN32)
+  static std::string exeDir() {
+      char buf[4096]; DWORD n = GetModuleFileNameA(NULL, buf, sizeof(buf));
+      std::string p(buf, n); auto s = p.find_last_of("\\/");
+      return s == std::string::npos ? "." : p.substr(0, s);
+  }
+#elif defined(__APPLE__)
+  #include <mach-o/dyld.h>
+  static std::string exeDir() {
+      char buf[4096]; uint32_t sz = sizeof(buf);
+      if (_NSGetExecutablePath(buf, &sz) != 0) return ".";
+      std::string p(buf); auto s = p.find_last_of('/');
+      return s == std::string::npos ? "." : p.substr(0, s);
+  }
+#else
+  #include <unistd.h>
+  static std::string exeDir() {
+      char buf[4096]; ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+      if (n <= 0) return ".";
+      buf[n] = 0; std::string p(buf); auto s = p.find_last_of('/');
+      return s == std::string::npos ? "." : p.substr(0, s);
+  }
+#endif
+
+static const int W = 640, H = 480;
+static const float PI2 = 6.28318530718f;
+
+// ------------------------------------------------------------------ helpers
+static inline float clampf(float x, float a, float b) { return x < a ? a : (x > b ? b : x); }
+static inline float lerpf(float a, float b, float t)  { return a + (b - a) * t; }
+static inline float fractf(float x) { return x - floorf(x); }
+static inline float smoothstepf(float e0, float e1, float x) {
+    float t = clampf((x - e0) / (e1 - e0), 0.f, 1.f);
+    return t * t * (3.f - 2.f * t);
+}
+struct RGB { float r, g, b; };
+static RGB hsvf(float h, float s, float v) {
+    h = h - floorf(h);
+    float i = floorf(h * 6.f), f = h * 6.f - i;
+    float p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
+    switch ((int)i % 6) {
+        case 0: return {v, t, p}; case 1: return {q, v, p}; case 2: return {p, v, t};
+        case 3: return {p, q, v}; case 4: return {t, p, v}; default: return {v, p, q};
+    }
+}
+static inline float hash21(int x, int y) {
+    uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return ((h ^ (h >> 16)) & 0xffffff) / 16777215.f;
+}
+template <class F>
+static void parallelRows(F&& f) {
+    int nt = (int)std::thread::hardware_concurrency();
+    nt = std::max(1, std::min(nt, 16));
+    std::atomic<int> row{0};
+    std::vector<std::thread> th;
+    for (int i = 0; i < nt; i++)
+        th.emplace_back([&]{ int y; while ((y = row.fetch_add(1)) < H) f(y); });
+    for (auto& t : th) t.join();
+}
+
+// ---- plugin descriptor + canvas trampolines ----
+static void tramp_add_px  (const VfxCanvas*, int, int, float, float, float, float);
+static void tramp_add_glow(const VfxCanvas*, float, float, float, float, float, float, float);
+static void tramp_add_line(const VfxCanvas*, float, float, float, float, float, float, float, float, float);
+static void tramp_hsv     (float, float, float, float*, float*, float*);
+
+struct PluginHandle {
+    void*                dl      = nullptr;
+    const VfxPluginInfo* info    = nullptr;
+    vfx_create_fn        create  = nullptr;
+    vfx_destroy_fn       destroy = nullptr;
+    vfx_render_fn        render  = nullptr;
+    void*                state   = nullptr;
+    std::string          name;
+};
+
+// ------------------------------------------------------------------ host
+struct Renderer {
+    VfxData data;                          // current score (moved in on load)
+    std::vector<float> fb, resolve, bloomA, bloomB;
+    static const int BW = W / 4, BH = H / 4;
+
+    int   forceScene = -1;                 // -1 = auto-rotate
+    float envBass = 0, envRms = 0, envBeat = 0, envCen = 0.3f, envMid = 0, envTre = 0;
+    std::vector<float> bandEnv;
+    int frameNo = 0;
+    VfxCanvas canvas{};
+    std::vector<PluginHandle> plugins;
+
+    Renderer() : fb((size_t)W*H*3), resolve((size_t)W*H*3),
+        bloomA((size_t)BW*BH*3), bloomB((size_t)BW*BH*3) {
+        canvas.width = W; canvas.height = H; canvas.fb = fb.data(); canvas.impl = this;
+        canvas.add_px = tramp_add_px; canvas.add_glow = tramp_add_glow;
+        canvas.add_line = tramp_add_line; canvas.hsv = tramp_hsv;
+    }
+
+    bool hasData() const { return data.header.frameCount > 0; }
+    void setData(VfxData&& d) {
+        data = std::move(d);
+        bandEnv.assign(data.header.bandCount, 0.f);
+        envBass = envRms = envBeat = envMid = envTre = 0; envCen = 0.3f;
+        frameNo = 0;
+    }
+
+    // ---------- primitives ----------
+    void addPx(int x, int y, RGB c, float k) {
+        if ((unsigned)x >= (unsigned)W || (unsigned)y >= (unsigned)H) return;
+        size_t i = ((size_t)y * W + x) * 3;
+        fb[i] += c.r * k; fb[i+1] += c.g * k; fb[i+2] += c.b * k;
+    }
+    void addGlow(float fx, float fy, RGB c, float k, float rad) {
+        int r = (int)ceilf(rad);
+        for (int dy = -r; dy <= r; dy++)
+            for (int dx = -r; dx <= r; dx++) {
+                float q = (dx*dx + dy*dy) / (rad * rad);
+                if (q > 1) continue;
+                addPx((int)fx + dx, (int)fy + dy, c, k * (1 - q) * (1 - q));
+            }
+    }
+    void addLine(float x0, float y0, float x1, float y1, RGB c, float k, float wpx) {
+        float dx = x1 - x0, dy = y1 - y0;
+        float len = sqrtf(dx*dx + dy*dy);
+        int n = std::max(2, (int)(len * 1.1f));
+        for (int i = 0; i <= n; i++) {
+            float t = (float)i / n;
+            addGlow(x0 + dx * t, y0 + dy * t, c, k / (0.6f * n), wpx);
+        }
+    }
+
+    // ---------- scene scheduling (plugins only) ----------
+    static constexpr float SCENE_LEN = 38.f, FADE = 4.f;
+    int totalScenes() const { return (int)plugins.size(); }
+    int sceneAt(double t, int slot) {
+        int total = totalScenes(); if (total <= 0) return 0;
+        long idx = (long)(t / SCENE_LEN) - slot;
+        if (idx < 0) idx = 0;
+        return (int)(idx % total);
+    }
+    VfxParams makeParams(double t, double dt, float alpha) {
+        VfxParams p{};
+        p.time = t; p.dt = dt; p.alpha = alpha;
+        p.bass = envBass; p.mid = envMid; p.treble = envTre; p.rms = envRms;
+        p.loud = data.scalarLerp(t, VFX_LOUD); p.centroid = envCen;
+        p.flux = data.scalarLerp(t, VFX_FLUX); p.beat = envBeat;
+        p.onset = data.scalarLerp(t, VFX_BEAT);
+        p.bpm = data.header.bpm; p.duration = data.header.duration; p.frameNo = frameNo;
+        p.bandCount = (int)data.header.bandCount; p.bands = bandEnv.data();
+        p.width = W; p.height = H;
+        return p;
+    }
+    void renderEntry(int idx, double t, double dt, float alpha) {
+        if (idx < 0 || idx >= (int)plugins.size()) return;
+        PluginHandle& h = plugins[idx];
+        if (!h.render || !h.state) return;
+        VfxParams p = makeParams(t, dt, alpha);
+        h.render(h.state, &canvas, &p);
+    }
+
+    void frame(double t, double dt) {
+        frameNo++;
+        std::fill(fb.begin(), fb.end(), 0.f);
+        if (hasData()) {
+            float bass = data.scalarLerp(t, VFX_BASS), rms = data.scalarLerp(t, VFX_RMS);
+            float mid  = data.scalarLerp(t, VFX_MID),  tre = data.scalarLerp(t, VFX_TREBLE);
+            float cen  = data.scalarLerp(t, VFX_CENTROID), beat = data.scalarLerp(t, VFX_BEAT);
+            auto env = [&](float& e, float v, float up, float dn) {
+                e = v > e ? lerpf(e, v, up) : lerpf(e, v, dn);
+            };
+            env(envBass, bass, 0.5f, 0.06f);  env(envRms, rms, 0.4f, 0.05f);
+            env(envMid,  mid,  0.5f, 0.07f);  env(envTre, tre, 0.5f, 0.10f);
+            env(envCen,  cen,  0.05f, 0.05f); env(envBeat, beat, 0.8f, 0.10f);
+            for (uint32_t b = 0; b < data.header.bandCount; b++)
+                env(bandEnv[b], data.bandLerp(t, b), 0.6f, 0.12f);
+        }
+        int total = totalScenes();
+        if (total > 0 && hasData()) {
+            if (forceScene >= 0) {
+                renderEntry(forceScene < total ? forceScene : 0, t, dt, 1.f);
+            } else {
+                float local = fractf((float)(t / SCENE_LEN)) * SCENE_LEN;
+                int cur = sceneAt(t, 0);
+                if (local < FADE && t > SCENE_LEN && total > 1) {
+                    float a = smoothstepf(0.f, FADE, local);
+                    renderEntry(sceneAt(t, 1), t, dt, 1.f - a);
+                    renderEntry(cur, t, dt, a);
+                } else {
+                    renderEntry(cur, t, dt, 1.f);
+                }
+            }
+        }
+        postFX(t);
+    }
+
+    // ---------- post-processing: bloom -> shake+aberration -> resolve ----------
+    void postFX(double t) {
+        (void)t;
+        for (int y = 0; y < BH; y++)
+            for (int x = 0; x < BW; x++) {
+                RGB s = {0,0,0};
+                for (int dy = 0; dy < 4; dy++)
+                    for (int dx = 0; dx < 4; dx++) {
+                        size_t i = (((size_t)(y*4+dy)) * W + (x*4+dx)) * 3;
+                        s.r += fb[i]; s.g += fb[i+1]; s.b += fb[i+2];
+                    }
+                size_t o = ((size_t)y * BW + x) * 3;
+                float lum = (s.r + s.g + s.b) / 48.f;
+                float k = smoothstepf(0.55f, 1.4f, lum);
+                bloomA[o] = s.r / 16.f * k; bloomA[o+1] = s.g / 16.f * k; bloomA[o+2] = s.b / 16.f * k;
+            }
+        for (int pass = 0; pass < 2; pass++) {
+            for (int y = 0; y < BH; y++)
+                for (int x = 0; x < BW; x++) {
+                    RGB s = {0,0,0};
+                    for (int k = -2; k <= 2; k++) {
+                        int xx = std::clamp(x + k, 0, BW - 1);
+                        size_t i = ((size_t)y * BW + xx) * 3;
+                        s.r += bloomA[i]; s.g += bloomA[i+1]; s.b += bloomA[i+2];
+                    }
+                    size_t o = ((size_t)y * BW + x) * 3;
+                    bloomB[o] = s.r / 5; bloomB[o+1] = s.g / 5; bloomB[o+2] = s.b / 5;
+                }
+            for (int y = 0; y < BH; y++)
+                for (int x = 0; x < BW; x++) {
+                    RGB s = {0,0,0};
+                    for (int k = -2; k <= 2; k++) {
+                        int yy = std::clamp(y + k, 0, BH - 1);
+                        size_t i = ((size_t)yy * BW + x) * 3;
+                        s.r += bloomB[i]; s.g += bloomB[i+1]; s.b += bloomB[i+2];
+                    }
+                    size_t o = ((size_t)y * BW + x) * 3;
+                    bloomA[o] = s.r / 5; bloomA[o+1] = s.g / 5; bloomA[o+2] = s.b / 5;
+                }
+        }
+        float shake = 5.5f * envBeat * envBeat;
+        float shx = (hash21(frameNo, 41) - 0.5f) * 2.f * shake;
+        float shy = (hash21(frameNo, 42) - 0.5f) * 2.f * shake;
+        float ca = 0.0025f + 0.008f * envBeat;
+        auto sampleFB = [&](float fx, float fy, int c) -> float {
+            int x0 = (int)floorf(fx), y0 = (int)floorf(fy);
+            float ax = fx - x0, ay = fy - y0;
+            x0 = std::clamp(x0, 0, W - 2); y0 = std::clamp(y0, 0, H - 2);
+            size_t i00 = ((size_t)y0 * W + x0) * 3 + c;
+            return lerpf(lerpf(fb[i00], fb[i00 + 3], ax),
+                         lerpf(fb[i00 + (size_t)W * 3], fb[i00 + (size_t)W * 3 + 3], ax), ay);
+        };
+        parallelRows([&](int y) {
+            for (int x = 0; x < W; x++) {
+                float dx = x - W * 0.5f, dy = y - H * 0.5f;
+                size_t o = ((size_t)y * W + x) * 3;
+                float off[3] = { 1.f + ca, 1.f, 1.f - ca };
+                for (int c = 0; c < 3; c++) {
+                    float sx2 = W * 0.5f + dx * off[c] + shx;
+                    float sy2 = H * 0.5f + dy * off[c] + shy;
+                    resolve[o + c] = sampleFB(sx2, sy2, c);
+                }
+                float bx = clampf((float)x / 4.f - 0.5f, 0.f, BW - 1.001f);
+                float by = clampf((float)y / 4.f - 0.5f, 0.f, BH - 1.001f);
+                int bx0 = (int)bx, by0 = (int)by;
+                float axc = bx - bx0, ayc = by - by0;
+                size_t b00 = ((size_t)by0 * BW + bx0) * 3;
+                for (int c = 0; c < 3; c++) {
+                    float v = lerpf(lerpf(bloomA[b00+c], bloomA[b00+3+c], axc),
+                                    lerpf(bloomA[b00+(size_t)BW*3+c], bloomA[b00+(size_t)BW*3+3+c], axc), ayc);
+                    resolve[o + c] += v * 0.9f;
+                }
+            }
+        });
+    }
+
+    // tonemap + vignette + grain -> RGB24
+    void toRGB24(std::vector<uint8_t>& out) {
+        out.resize((size_t)W * H * 3);
+        parallelRows([&](int y) {
+            float vy = (float)y / H - 0.48f;
+            for (int x = 0; x < W; x++) {
+                float vx = (float)x / W - 0.5f;
+                float vig = clampf(1.f - 1.10f * (vx * vx + vy * vy), 0.f, 1.f);
+                float grain = (hash21(x + frameNo * 613, y) - 0.5f) * 0.020f;
+                size_t i = ((size_t)y * W + x) * 3;
+                for (int c = 0; c < 3; c++) {
+                    float v = resolve[i + c] * vig;
+                    v = 1.f - expf(-v * 1.55f);
+                    v = powf(v, 1.f / 2.2f) + grain;
+                    out[i + c] = (uint8_t)(clampf(v, 0.f, 1.f) * 255.f + 0.5f);
+                }
+            }
+        });
+    }
+};
+
+// ---- canvas trampolines ----
+static void tramp_add_px(const VfxCanvas* c, int x, int y, float r, float g, float b, float k) {
+    ((Renderer*)c->impl)->addPx(x, y, RGB{r, g, b}, k);
+}
+static void tramp_add_glow(const VfxCanvas* c, float x, float y, float r, float g, float b, float k, float rad) {
+    ((Renderer*)c->impl)->addGlow(x, y, RGB{r, g, b}, k, rad);
+}
+static void tramp_add_line(const VfxCanvas* c, float x0, float y0, float x1, float y1, float r, float g, float b, float k, float w) {
+    ((Renderer*)c->impl)->addLine(x0, y0, x1, y1, RGB{r, g, b}, k, w);
+}
+static void tramp_hsv(float h, float s, float v, float* r, float* g, float* b) {
+    RGB c = hsvf(h, s, v); *r = c.r; *g = c.g; *b = c.b;
+}
+
+// ---- plugin discovery/loading ----
+static bool loadPluginHandle(const std::string& path, PluginHandle& out) {
+    void* dl = dynOpen(path.c_str());
+    if (!dl) return false;
+    auto info = (vfx_info_fn)   dynSym(dl, "vfx_plugin_info");
+    auto cr   = (vfx_create_fn) dynSym(dl, "vfx_plugin_create");
+    auto de   = (vfx_destroy_fn)dynSym(dl, "vfx_plugin_destroy");
+    auto rn   = (vfx_render_fn) dynSym(dl, "vfx_plugin_render");
+    if (!info || !cr || !de || !rn) { dynClose(dl); return false; }
+    const VfxPluginInfo* pi = info();
+    if (!pi || pi->abi != VFX_PLUGIN_ABI) { dynClose(dl); return false; }
+    out.dl = dl; out.info = pi; out.create = cr; out.destroy = de; out.render = rn;
+    out.name = pi->name ? pi->name : "plugin";
+    return true;
+}
+static bool isPluginExt(const std::string& ext) {
+#if defined(_WIN32)
+    return ext == ".dll";
+#elif defined(__APPLE__)
+    return ext == ".dylib" || ext == ".so";   // MODULE libs can be either on macOS
+#else
+    return ext == ".so";
+#endif
+}
+static void scanPluginDir(const std::string& dir, std::vector<std::string>& out) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return;
+    std::vector<std::string> files;
+    for (auto& e : fs::directory_iterator(dir, ec)) {
+        if (ec) break;
+        auto p = e.path();
+        if (isPluginExt(p.extension().string())) files.push_back(p.string());
+    }
+    std::sort(files.begin(), files.end());
+    for (auto& f : files) out.push_back(f);
+}
+static std::vector<PluginHandle> loadPlugins(const std::vector<std::string>& dirs) {
+    std::vector<std::string> files;
+    for (auto& d : dirs) scanPluginDir(d, files);
+    std::vector<PluginHandle> loaded;
+    for (auto& f : files) {
+        PluginHandle h;
+        if (loadPluginHandle(f, h)) loaded.push_back(h);
+        else fprintf(stderr, "warn: skip plugin %s\n", f.c_str());
+    }
+    return loaded;
+}
+static std::vector<std::string> defaultPluginDirs(const std::vector<std::string>& user) {
+    if (!user.empty()) return user;
+    std::string ed = exeDir();
+    return { ed + "/plugins", ed + "/../plugins", ed + "/../Resources/plugins" };
+}
+
+// ================================================================== main
+static void printScenes(const std::vector<PluginHandle>& plugins) {
+    for (auto& h : plugins) printf("%s\n", h.name.c_str());
+    fflush(stdout);
+}
+static int findScene(const std::vector<PluginHandle>& plugins, const std::string& name) {
+    auto lc = [](std::string s){ for (auto& ch : s) ch = (char)tolower((unsigned char)ch); return s; };
+    std::string want = lc(name);
+    for (size_t i = 0; i < plugins.size(); i++)
+        if (lc(plugins[i].name) == want) return (int)i;
+    return -1;
+}
+
+#ifdef USE_SDL
+// ---- audio context (callback-driven, mute-aware, drives the master clock) ----
+struct AudioCtx {
+    std::vector<short> pcm;   // interleaved 16-bit
+    int hz = 0, ch = 2;
+    std::atomic<size_t> pos{0};
+    std::atomic<bool>   muted{false};
+    std::atomic<bool>   hasAudio{false};
+};
+static void audioCB(void* ud, Uint8* stream, int len) {
+    AudioCtx* a = (AudioCtx*)ud;
+    Sint16* out = (Sint16*)stream;
+    int n = len / (int)sizeof(Sint16);
+    size_t p = a->pos.load(std::memory_order_relaxed);
+    size_t sz = a->pcm.size();
+    bool m = a->muted.load(std::memory_order_relaxed);
+    for (int i = 0; i < n; i++) {
+        if (p < sz) { out[i] = m ? 0 : a->pcm[p]; p++; }   // advance even when muted
+        else out[i] = 0;
+    }
+    a->pos.store(p, std::memory_order_relaxed);
+}
+#endif
+
+int main(int argc, char** argv) {
+    std::string inPath, audioPath, sceneName;
+    bool renderMode = false, listScenes = false;
+    int outFps = 30, forceScene = -1;
+    double tStart = 0, tEnd = -1;
+    std::vector<std::string> pluginDirs;
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        if      (a == "--render") renderMode = true;
+        else if (a == "--audio"      && i + 1 < argc) audioPath = argv[++i];
+        else if (a == "--fps"        && i + 1 < argc) outFps = atoi(argv[++i]);
+        else if (a == "--start"      && i + 1 < argc) tStart = atof(argv[++i]);
+        else if (a == "--end"        && i + 1 < argc) tEnd = atof(argv[++i]);
+        else if (a == "--scene"      && i + 1 < argc) forceScene = atoi(argv[++i]);
+        else if (a == "--scene-name" && i + 1 < argc) sceneName = argv[++i];
+        else if (a == "--plugins"    && i + 1 < argc) pluginDirs.push_back(argv[++i]);
+        else if (a == "--list-scenes") listScenes = true;
+        else if (inPath.empty()) inPath = a;
+    }
+
+    std::vector<PluginHandle> loaded = loadPlugins(defaultPluginDirs(pluginDirs));
+
+    if (listScenes) { printScenes(loaded); return 0; }
+
+    Renderer R;
+    R.plugins = std::move(loaded);
+    for (auto& h : R.plugins) h.state = h.create ? h.create(W, H) : nullptr;
+    if (!R.plugins.empty()) fprintf(stderr, "plugins: %zu loaded\n", R.plugins.size());
+
+    if (!sceneName.empty()) {
+        int idx = findScene(R.plugins, sceneName);
+        if (idx >= 0) forceScene = idx;
+        else fprintf(stderr, "warn: scene '%s' not found\n", sceneName.c_str());
+    }
+    R.forceScene = forceScene;
+
+    // ---- load initial track (mp3 -> analyze, or .veffects directly) ----
+    VfxAudioPCM startPcm;
+    auto endsWith = [](const std::string& s, const char* suf){
+        size_t n = strlen(suf); return s.size() >= n && s.compare(s.size()-n, n, suf) == 0;
+    };
+    if (!inPath.empty()) {
+        if (endsWith(inPath, ".veffects")) {
+            VfxData d;
+            if (!vfxLoad(inPath, d)) { fprintf(stderr, "error: cannot load %s\n", inPath.c_str()); return 1; }
+            R.setData(std::move(d));
+            if (!audioPath.empty()) {
+                VfxData tmp; vfxAnalyzeMp3(audioPath, tmp, &startPcm);   // decode only for playback
+            }
+        } else {
+            VfxData d; std::string err;
+            fprintf(stderr, "analyzing %s ...\n", inPath.c_str());
+            if (!vfxAnalyzeMp3(inPath, d, &startPcm, &err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+            R.setData(std::move(d));
+            if (audioPath.empty()) audioPath = inPath;
+        }
+        fprintf(stderr, "loaded: %.1f s, %u frames, bpm %.1f\n",
+                R.data.header.duration, R.data.header.frameCount, R.data.header.bpm);
+    }
+    if (tEnd < 0) tEnd = R.hasData() ? R.data.header.duration : 0;
+
+    // ---- headless render mode (offline mp4 via a pipe) ----
+    if (renderMode) {
+        if (!R.hasData()) { fprintf(stderr, "error: --render needs an input track\n"); return 1; }
+        std::vector<uint8_t> rgb;
+        int nFrames = (int)((tEnd - tStart) * outFps);
+        double dt = 1.0 / outFps;
+        for (int i = 0; i < nFrames; i++) {
+            double t = tStart + i * dt;
+            R.frame(t, dt);
+            R.toRGB24(rgb);
+            fwrite(rgb.data(), 1, rgb.size(), stdout);
+            if (i % (outFps * 5) == 0) fprintf(stderr, "\rrender: %.1f / %.1f s", t - tStart, tEnd - tStart);
+        }
+        fprintf(stderr, "\rrender done: %d frames            \n", nFrames);
+        return 0;
+    }
+
+#ifdef USE_SDL
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
+        fprintf(stderr, "SDL error: %s\n", SDL_GetError()); return 1;
+    }
+    int winW = 820, winH = 620;
+    SDL_Window* win = SDL_CreateWindow("veffects", SDL_WINDOWPOS_CENTERED,
+        SDL_WINDOWPOS_CENTERED, winW, winH, SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE);
+    SDL_Renderer* ren = SDL_CreateRenderer(win, -1,
+        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    SDL_Texture* tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB24,
+        SDL_TEXTUREACCESS_STREAMING, W, H);
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr;   // don't write imgui.ini next to the binary
+    ImGui::StyleColorsDark();
+    ImGui_ImplSDL2_InitForSDLRenderer(win, ren);
+    ImGui_ImplSDLRenderer2_Init(ren);
+
+    // ---- audio device ----
+    AudioCtx actx;
+    SDL_AudioDeviceID adev = 0;
+    auto openAudio = [&](VfxAudioPCM&& pcm) {
+        if (adev) { SDL_CloseAudioDevice(adev); adev = 0; }
+        actx.pos.store(0);
+        actx.hasAudio.store(false);
+        if (pcm.hz > 0 && !pcm.interleaved.empty()) {
+            actx.pcm = std::move(pcm.interleaved);
+            actx.hz = pcm.hz; actx.ch = pcm.ch;
+            SDL_AudioSpec want{}, have{};
+            want.freq = actx.hz; want.format = AUDIO_S16SYS;
+            want.channels = (Uint8)actx.ch; want.samples = 1024;
+            want.callback = audioCB; want.userdata = &actx;
+            adev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+            if (adev) { actx.hasAudio.store(true); SDL_PauseAudioDevice(adev, 0); }
+        }
+    };
+    if (R.hasData() && startPcm.hz > 0) openAudio(std::move(startPcm));
+
+    // ---- background analysis job (Open) ----
+    struct LoadJob {
+        std::thread th; std::atomic<int> state{0};   // 0 idle,1 running,2 done,3 error
+        std::string path, err, name; VfxData data; VfxAudioPCM pcm;
+    } job;
+    auto startLoad = [&](const std::string& path) {
+        if (job.state.load() == 1) return;
+        if (job.th.joinable()) job.th.join();
+        job.path = path; job.err.clear();
+        job.name = std::filesystem::path(path).filename().string();
+        job.state.store(1);
+        job.th = std::thread([&job]{
+            VfxData d; VfxAudioPCM pcm; std::string err;
+            bool ok = vfxAnalyzeMp3(job.path, d, &pcm, &err);
+            if (ok) { job.data = std::move(d); job.pcm = std::move(pcm); job.state.store(2); }
+            else    { job.err = err; job.state.store(3); }
+        });
+    };
+
+    // clock: perf-counter fallback when there is no audio
+    Uint64 pfreq = SDL_GetPerformanceFrequency();
+    Uint64 t0 = SDL_GetPerformanceCounter();
+    double tManual = 0; bool paused = false;
+    std::vector<uint8_t> rgb;
+    std::string trackName = inPath.empty() ? "" : std::filesystem::path(inPath).filename().string();
+    std::string status;
+
+    // scene combo items
+    auto sceneItems = [&]{
+        std::vector<std::string> v; v.push_back("Auto (cycle all)");
+        for (auto& h : R.plugins) v.push_back(h.name);
+        return v;
+    };
+    std::vector<std::string> scenes = sceneItems();
+    int sceneSel = (R.forceScene >= 0) ? R.forceScene + 1 : 0;
+
+    bool run = true;
+    while (run) {
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {
+            ImGui_ImplSDL2_ProcessEvent(&e);
+            ImGuiIO& io = ImGui::GetIO();
+            if (e.type == SDL_QUIT) run = false;
+            if (e.type == SDL_DROPFILE) {                    // drag & drop an mp3
+                char* f = e.drop.file;
+                if (f) { startLoad(f); status = "Analyzing..."; SDL_free(f); }
+            }
+            if (e.type == SDL_KEYDOWN && !io.WantCaptureKeyboard) {
+                SDL_Keycode k = e.key.keysym.sym;
+                if (k == SDLK_ESCAPE) run = false;
+                if (k == SDLK_SPACE) { paused = !paused; if (adev) SDL_PauseAudioDevice(adev, paused ? 1 : 0); }
+                if (k == SDLK_m) { bool nm = !actx.muted.load(); actx.muted.store(nm); }
+                if (k >= SDLK_1 && k <= SDLK_9) {
+                    int idx = (int)(k - SDLK_1);
+                    if (idx < R.totalScenes()) { R.forceScene = idx; sceneSel = idx + 1; }
+                }
+                if (k == SDLK_0) { R.forceScene = -1; sceneSel = 0; }
+            }
+        }
+
+        // apply finished analysis
+        if (job.state.load() == 2) {
+            if (job.th.joinable()) job.th.join();
+            R.setData(std::move(job.data));
+            openAudio(std::move(job.pcm));
+            trackName = job.name; status.clear(); paused = false;
+            tManual = 0; t0 = SDL_GetPerformanceCounter();
+            job.state.store(0);
+        } else if (job.state.load() == 3) {
+            if (job.th.joinable()) job.th.join();
+            status = "Analyze failed: " + job.err;
+            job.state.store(0);
+        }
+
+        // ---- master clock ----
+        double t;
+        if (actx.hasAudio.load()) {
+            size_t p = actx.pos.load();
+            t = (double)(p / std::max(1, actx.ch)) / std::max(1, actx.hz);
+            if (R.hasData() && t >= R.data.header.duration - 0.02) {   // loop
+                actx.pos.store(0); t = 0;
+            }
+        } else {
+            Uint64 now = SDL_GetPerformanceCounter();
+            if (!paused) tManual += (double)(now - t0) / pfreq;
+            t0 = now;
+            t = tManual;
+            if (R.hasData() && t > R.data.header.duration) { tManual = 0; t = 0; }
+        }
+
+        // ---- render visualization to the streaming texture ----
+        double dt = 1.0 / 60.0;
+        R.frame(t, dt);
+        R.toRGB24(rgb);
+        SDL_UpdateTexture(tex, NULL, rgb.data(), W * 3);
+
+        // ---- ImGui panel ----
+        ImGui_ImplSDLRenderer2_NewFrame();
+        ImGui_ImplSDL2_NewFrame();
+        ImGui::NewFrame();
+        {
+            ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
+            ImGui::Begin("veffects", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+            ImGui::TextColored(ImVec4(0.3f, 0.85f, 0.95f, 1), "veffects");
+            ImGui::SameLine(); ImGui::TextDisabled("music -> math visuals");
+
+            if (ImGui::Button("Open mp3...")) {
+                const char* filt[1] = { "*.mp3" };
+                const char* f = tinyfd_openFileDialog("Open an mp3", "", 1, filt, "mp3 audio", 0);
+                if (f) { startLoad(f); status = "Analyzing..."; }
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", trackName.empty() ? "(no track - drag an mp3 here)" : trackName.c_str());
+
+            // scene dropdown
+            if (!scenes.empty()) {
+                std::vector<const char*> ci; for (auto& s : scenes) ci.push_back(s.c_str());
+                if (ImGui::Combo("Scene", &sceneSel, ci.data(), (int)ci.size()))
+                    R.forceScene = (sceneSel == 0) ? -1 : sceneSel - 1;
+            }
+
+            // mute + transport
+            bool muted = actx.muted.load();
+            if (ImGui::Checkbox("Mute original audio", &muted)) actx.muted.store(muted);
+            if (ImGui::Button(paused ? "Play" : "Pause")) {
+                paused = !paused; if (adev) SDL_PauseAudioDevice(adev, paused ? 1 : 0);
+            }
+            ImGui::SameLine();
+            double dur = R.hasData() ? R.data.header.duration : 0;
+            ImGui::Text("%02d:%05.2f / %02d:%05.2f", (int)t/60, fmod(t,60.0), (int)dur/60, fmod(dur,60.0));
+            if (R.hasData() && R.data.header.bpm > 0) { ImGui::SameLine(); ImGui::TextDisabled("~%.0f BPM", R.data.header.bpm); }
+
+            if (!status.empty()) ImGui::TextColored(ImVec4(1,0.7f,0.2f,1), "%s", status.c_str());
+            ImGui::TextDisabled("keys: 1-9 scene, 0 auto, Space pause, M mute, Esc quit");
+            ImGui::End();
+        }
+        ImGui::Render();
+
+        // ---- compose: letterboxed viz + ImGui overlay ----
+        int ww, wh; SDL_GetRendererOutputSize(ren, &ww, &wh);
+        SDL_SetRenderDrawColor(ren, 6, 7, 12, 255);
+        SDL_RenderClear(ren);
+        float scale = std::min((float)ww / W, (float)wh / H);
+        SDL_Rect dst;
+        dst.w = (int)(W * scale); dst.h = (int)(H * scale);
+        dst.x = (ww - dst.w) / 2; dst.y = (wh - dst.h) / 2;
+        SDL_RenderCopy(ren, tex, NULL, &dst);
+        ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), ren);
+        SDL_RenderPresent(ren);
+    }
+
+    if (job.th.joinable()) job.th.join();
+    if (adev) SDL_CloseAudioDevice(adev);
+    for (auto& h : R.plugins) if (h.destroy && h.state) h.destroy(h.state);
+    ImGui_ImplSDLRenderer2_Shutdown();
+    ImGui_ImplSDL2_Shutdown();
+    ImGui::DestroyContext();
+    SDL_DestroyTexture(tex); SDL_DestroyRenderer(ren); SDL_DestroyWindow(win);
+    SDL_Quit();
+    return 0;
+#else
+    fprintf(stderr, "Built without SDL/GUI. Use --render or --list-scenes.\n");
+    return R.hasData() ? 0 : 1;
+#endif
+}
