@@ -60,6 +60,11 @@ Every scene is a hot-loadable **plugin**, so the visual style is fully extensibl
 | **Matrix** | The iconic dense green code rain with bright white leaders and parallax depth. |
 | **Underwater** | A serene ocean: caustic light, fish schools, a jellyfish, swaying kelp, bubbles. |
 | **Spaceport** | A lit space station over a planet, docking beacons and ships on engine trails. |
+| **Cyberpunk 2077** | Night City: a dense neon skyline of holographic billboards, AV traffic, rain, holo-glitch. |
+| **Dune** | Arrakis: a colossal sandworm breaching rolling dunes under twin moons, spice glitter. |
+| **Volcano** | A nighttime eruption: lava fountain, glowing lava rivers, ash plume and embers. |
+| **Winter Forest** | A snowy night: moon, shimmering aurora, snow-laden firs and falling snow. |
+| **Jungle** | A lush rainforest: layered foliage, vines, god-rays, fireflies and tropical birds. |
 
 **Image-driven** (load an image first -- Open image, drag a file in, or `--image`)
 
