@@ -65,6 +65,11 @@ Every scene is a hot-loadable **plugin**, so the visual style is fully extensibl
 | **Volcano** | A nighttime eruption: lava fountain, glowing lava rivers, ash plume and embers. |
 | **Winter Forest** | A snowy night: moon, shimmering aurora, snow-laden firs and falling snow. |
 | **Jungle** | A lush rainforest: layered foliage, vines, god-rays, fireflies and tropical birds. |
+| **Savanna** | An African sunset: acacia silhouettes, golden grass, giraffes and gazelles. |
+| **Heaven** | A celestial paradise: luminous clouds, god-rays, rising light orbs and doves. |
+| **Hell** | An infernal underworld: lava lakes, towering flames, embers and a horned demon. |
+| **Black Hole** | A lensed starfield warping around an event horizon, photon ring and accretion disk. |
+| **Galaxy** | A tilted spiral galaxy: glowing core, star-filled arms and nebula dust. |
 
 **Image-driven** (load an image first -- Open image, drag a file in, or `--image`)
 
@@ -74,7 +79,9 @@ Every scene is a hot-loadable **plugin**, so the visual style is fully extensibl
 | **Image World 3D** | The image becomes an isometric voxel world -- brightness is height, color is tint (3D, Sims-like). |
 
 Scenes auto-crossfade over the track, or pick one from the dropdown (keys `1`-`9`,
-`0` = auto).
+`0` = auto). Auto rotation has two modes: **Timed** (fixed interval) and
+**Reactive**, which changes scenes at the track's energy shifts (build-ups and
+drops) derived from the score.
 
 ## Build
 

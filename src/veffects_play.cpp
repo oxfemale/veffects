@@ -163,6 +163,8 @@ struct Renderer {
     static const int BW = W / 4, BH = H / 4;
 
     int   forceScene = -1;                 // -1 = auto-rotate
+    int   autoMode = 0;                    // 0 = timed rotation, 1 = reactive (follow the music)
+    std::vector<float> cuts;               // reactive scene-change times (from the score)
     float envBass = 0, envRms = 0, envBeat = 0, envCen = 0.3f, envMid = 0, envTre = 0;
     std::vector<float> bandEnv;
     int frameNo = 0;
@@ -190,6 +192,35 @@ struct Renderer {
         bandEnv.assign(data.header.bandCount, 0.f);
         envBass = envRms = envBeat = envMid = envTre = 0; envCen = 0.3f;
         frameNo = 0;
+        computeCuts();
+    }
+
+    // Reactive mode: derive scene-change times from the track's energy structure.
+    // A cut is placed where the smoothed loudness has drifted noticeably since the
+    // last cut (a build-up or drop), spaced within [minGap, maxGap] seconds.
+    void computeCuts() {
+        cuts.clear();
+        if (!hasData()) return;
+        int N = (int)data.header.frameCount, fps = (int)data.header.fps;
+        if (N < 2 || fps <= 0) return;
+        std::vector<float> e(N);
+        float acc = 0;
+        for (int i = 0; i < N; i++) {
+            float v = data.scalars[(size_t)i * VFX_NSCALARS + VFX_RMS];
+            acc = lerpf(acc, v, 0.02f); e[i] = acc;    // ~1s smoothing
+        }
+        const double minGap = 12.0, maxGap = 38.0;
+        cuts.push_back(0.f);
+        double lastCut = 0; float refE = e[0];
+        for (int i = 1; i < N; i++) {
+            double ti = (double)i / fps;
+            if ((fabsf(e[i] - refE) > 0.18f && ti - lastCut > minGap) ||
+                (ti - lastCut > maxGap)) {
+                cuts.push_back((float)ti); lastCut = ti; refE = e[i];
+            }
+        }
+        cuts.push_back((float)data.header.duration + 1.f);
+        fprintf(stderr, "reactive: %zu cut points\n", cuts.size());
     }
 
     // ---------- primitives ----------
@@ -247,6 +278,31 @@ struct Renderer {
         h.render(h.state, &canvas, &p);
     }
 
+    // Auto rotation: timed (fixed length) or reactive (score-driven cut points),
+    // crossfading into the new scene at each segment boundary.
+    void autoRender(double t, double dt) {
+        int total = totalScenes(); if (total <= 0) return;
+        long k; double s0;
+        if (autoMode == 1 && cuts.size() >= 2) {
+            k = 0;
+            while (k + 1 < (long)cuts.size() && cuts[k + 1] <= t) k++;
+            if (k < 0) k = 0;
+            s0 = cuts[k];
+        } else {
+            k = (long)(t / SCENE_LEN); s0 = k * (double)SCENE_LEN;
+        }
+        int cur = (int)(((k % total) + total) % total);
+        float local = (float)(t - s0);
+        if (local < FADE && k > 0 && total > 1) {
+            float a = smoothstepf(0.f, FADE, local);
+            int prev = (int)((((k - 1) % total) + total) % total);
+            renderEntry(prev, t, dt, 1.f - a);
+            renderEntry(cur, t, dt, a);
+        } else {
+            renderEntry(cur, t, dt, 1.f);
+        }
+    }
+
     void frame(double t, double dt) {
         frameNo++;
         std::fill(fb.begin(), fb.end(), 0.f);
@@ -268,15 +324,7 @@ struct Renderer {
             if (forceScene >= 0) {
                 renderEntry(forceScene < total ? forceScene : 0, t, dt, 1.f);
             } else {
-                float local = fractf((float)(t / SCENE_LEN)) * SCENE_LEN;
-                int cur = sceneAt(t, 0);
-                if (local < FADE && t > SCENE_LEN && total > 1) {
-                    float a = smoothstepf(0.f, FADE, local);
-                    renderEntry(sceneAt(t, 1), t, dt, 1.f - a);
-                    renderEntry(cur, t, dt, a);
-                } else {
-                    renderEntry(cur, t, dt, 1.f);
-                }
+                autoRender(t, dt);
             }
         }
         postFX(t);
@@ -513,7 +561,7 @@ static int exportMp4(Renderer& R, const std::string& audio, const std::string& o
 
 int main(int argc, char** argv) {
     std::string inPath, audioPath, sceneName, imagePath, exportPath;
-    bool renderMode = false, listScenes = false;
+    bool renderMode = false, listScenes = false, reactiveFlag = false;
     int outFps = 30, forceScene = -1;
     double tStart = 0, tEnd = -1;
     std::vector<std::string> pluginDirs;
@@ -529,6 +577,7 @@ int main(int argc, char** argv) {
         else if (a == "--scene-name" && i + 1 < argc) sceneName = argv[++i];
         else if (a == "--plugins"    && i + 1 < argc) pluginDirs.push_back(argv[++i]);
         else if (a == "--export"     && i + 1 < argc) exportPath = argv[++i];
+        else if (a == "--reactive")  reactiveFlag = true;
         else if (a == "--list-scenes") listScenes = true;
         else if (inPath.empty()) inPath = a;
     }
@@ -548,6 +597,7 @@ int main(int argc, char** argv) {
         else fprintf(stderr, "warn: scene '%s' not found\n", sceneName.c_str());
     }
     R.forceScene = forceScene;
+    if (reactiveFlag) { R.autoMode = 1; R.forceScene = -1; }
 
     if (!imagePath.empty()) {
         std::vector<unsigned char> px; int w, h;
@@ -826,6 +876,13 @@ int main(int argc, char** argv) {
                 std::vector<const char*> ci; for (auto& s : scenes) ci.push_back(s.c_str());
                 if (ImGui::Combo("Scene", &sceneSel, ci.data(), (int)ci.size()))
                     R.forceScene = (sceneSel == 0) ? -1 : sceneSel - 1;
+            }
+            if (sceneSel == 0) {                     // Auto: how to switch scenes
+                const char* modes[] = { "Timed", "Reactive" };
+                int am = R.autoMode;
+                ImGui::SetNextItemWidth(140);
+                if (ImGui::Combo("Auto mode", &am, modes, 2)) R.autoMode = am;
+                ImGui::SameLine(); ImGui::TextDisabled("(Reactive follows the music)");
             }
 
             // mute + transport
