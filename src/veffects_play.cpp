@@ -35,6 +35,8 @@
 #include <atomic>
 #include <mutex>
 #include <filesystem>
+#include <set>
+#include <fstream>
 
 #ifdef USE_SDL
   #include <SDL.h>
@@ -114,6 +116,9 @@ static inline float hash21(int x, int y) {
     h = (h ^ (h >> 13)) * 1274126177u;
     return ((h ^ (h >> 16)) & 0xffffff) / 16777215.f;
 }
+static inline uint32_t hashu32(uint32_t x) {
+    x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16; return x;
+}
 template <class F>
 static void parallelRows(F&& f) {
     int nt = (int)std::thread::hardware_concurrency();
@@ -163,7 +168,9 @@ struct Renderer {
     static const int BW = W / 4, BH = H / 4;
 
     int   forceScene = -1;                 // -1 = auto-rotate
-    int   autoMode = 0;                    // 0 = timed rotation, 1 = reactive (follow the music)
+    int   autoMode = 0;                    // 0 = timed, 1 = reactive (follow music), 2 = shuffle
+    bool  favoritesOnly = false;           // auto-cycle only starred scenes
+    std::set<std::string> favSet;          // favorite scene names
     std::vector<float> cuts;               // reactive scene-change times (from the score)
     float envBass = 0, envRms = 0, envBeat = 0, envCen = 0.3f, envMid = 0, envTre = 0;
     std::vector<float> bandEnv;
@@ -280,22 +287,43 @@ struct Renderer {
 
     // Auto rotation: timed (fixed length) or reactive (score-driven cut points),
     // crossfading into the new scene at each segment boundary.
+    // pool of scene indices to cycle: favorites only, or all
+    void buildPool(std::vector<int>& pool) {
+        int total = totalScenes();
+        for (int i = 0; i < total; i++)
+            if (!favoritesOnly || favSet.count(plugins[i].name)) pool.push_back(i);
+        if (pool.empty()) for (int i = 0; i < total; i++) pool.push_back(i);
+    }
+    int poolPick(long k, int ps) {
+        if (ps <= 0) return 0;
+        if (autoMode == 2) {                      // shuffle: pseudo-random order
+            int idx = (int)(hashu32((uint32_t)(k * 2654435761u)) % (uint32_t)ps);
+            if (ps > 1) {
+                int prev = (int)(hashu32((uint32_t)((k - 1) * 2654435761u)) % (uint32_t)ps);
+                if (idx == prev) idx = (idx + 1) % ps;
+            }
+            return idx;
+        }
+        return (int)(((k % ps) + ps) % ps);
+    }
     void autoRender(double t, double dt) {
         int total = totalScenes(); if (total <= 0) return;
+        std::vector<int> pool; buildPool(pool);
+        int ps = (int)pool.size();
         long k; double s0;
-        if (autoMode == 1 && cuts.size() >= 2) {
+        if (autoMode == 1 && cuts.size() >= 2) {   // reactive: score-derived cut points
             k = 0;
             while (k + 1 < (long)cuts.size() && cuts[k + 1] <= t) k++;
             if (k < 0) k = 0;
             s0 = cuts[k];
-        } else {
+        } else {                                   // timed / shuffle: fixed intervals
             k = (long)(t / SCENE_LEN); s0 = k * (double)SCENE_LEN;
         }
-        int cur = (int)(((k % total) + total) % total);
+        int cur = pool[poolPick(k, ps)];
         float local = (float)(t - s0);
-        if (local < FADE && k > 0 && total > 1) {
+        if (local < FADE && k > 0 && ps > 1) {
             float a = smoothstepf(0.f, FADE, local);
-            int prev = (int)((((k - 1) % total) + total) % total);
+            int prev = pool[poolPick(k - 1, ps)];
             renderEntry(prev, t, dt, 1.f - a);
             renderEntry(cur, t, dt, a);
         } else {
@@ -532,6 +560,23 @@ static void audioCB(void* ud, Uint8* stream, int len) {
 }
 #endif
 
+// ---- favorites persistence (~/.veffects_favorites.txt) ----
+static std::string favPath() {
+    const char* h = getenv("HOME");
+#if defined(_WIN32)
+    if (!h || !*h) h = getenv("USERPROFILE");
+#endif
+    std::string base = (h && *h) ? h : ".";
+    return base + "/.veffects_favorites.txt";
+}
+static void loadFavs(std::set<std::string>& s) {
+    std::ifstream f(favPath()); std::string line;
+    while (std::getline(f, line)) { if (!line.empty()) s.insert(line); }
+}
+static void saveFavs(const std::set<std::string>& s) {
+    std::ofstream f(favPath()); for (auto& n : s) f << n << "\n";
+}
+
 // Render the whole track (one scene) to an mp4 via ffmpeg. Returns 1 ok, 2 no ffmpeg, 3 aborted.
 static int exportMp4(Renderer& R, const std::string& audio, const std::string& outPath,
                      int sceneIdx, std::atomic<bool>* abort = nullptr,
@@ -598,6 +643,7 @@ int main(int argc, char** argv) {
     }
     R.forceScene = forceScene;
     if (reactiveFlag) { R.autoMode = 1; R.forceScene = -1; }
+    loadFavs(R.favSet);
 
     if (!imagePath.empty()) {
         std::vector<unsigned char> px; int w, h;
@@ -871,18 +917,40 @@ int main(int argc, char** argv) {
             ImGui::SameLine();
             ImGui::TextDisabled("%s", imageName.empty() ? "(for image scenes)" : imageName.c_str());
 
-            // scene dropdown
+            // scene dropdown ("* " marks favorites)
             if (!scenes.empty()) {
-                std::vector<const char*> ci; for (auto& s : scenes) ci.push_back(s.c_str());
+                std::vector<std::string> labels; labels.reserve(scenes.size());
+                labels.push_back(scenes[0]);
+                for (size_t i = 1; i < scenes.size(); i++)
+                    labels.push_back((R.favSet.count(scenes[i]) ? "* " : "") + scenes[i]);
+                std::vector<const char*> ci; for (auto& s : labels) ci.push_back(s.c_str());
                 if (ImGui::Combo("Scene", &sceneSel, ci.data(), (int)ci.size()))
                     R.forceScene = (sceneSel == 0) ? -1 : sceneSel - 1;
             }
+            ImGui::SameLine();
+            if (ImGui::Button("Random")) {
+                int total = R.totalScenes();
+                if (total > 0) {
+                    int idx = (int)(SDL_GetPerformanceCounter() % (Uint64)total);
+                    R.forceScene = idx; sceneSel = idx + 1;
+                }
+            }
+            if (sceneSel >= 1 && sceneSel - 1 < (int)R.plugins.size()) {   // favorite the current scene
+                std::string nm = R.plugins[sceneSel - 1].name;
+                bool fav = R.favSet.count(nm) > 0;
+                if (ImGui::Checkbox("Favorite", &fav)) {
+                    if (fav) R.favSet.insert(nm); else R.favSet.erase(nm);
+                    saveFavs(R.favSet);
+                }
+            }
             if (sceneSel == 0) {                     // Auto: how to switch scenes
-                const char* modes[] = { "Timed", "Reactive" };
+                const char* modes[] = { "Timed", "Reactive", "Shuffle" };
                 int am = R.autoMode;
                 ImGui::SetNextItemWidth(140);
-                if (ImGui::Combo("Auto mode", &am, modes, 2)) R.autoMode = am;
+                if (ImGui::Combo("Auto mode", &am, modes, 3)) R.autoMode = am;
                 ImGui::SameLine(); ImGui::TextDisabled("(Reactive follows the music)");
+                bool fo = R.favoritesOnly;
+                if (ImGui::Checkbox("Favorites only", &fo)) R.favoritesOnly = fo;
             }
 
             // mute + transport

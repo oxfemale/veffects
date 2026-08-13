@@ -33,6 +33,8 @@ Every scene is a hot-loadable **plugin**, so the visual style is fully extensibl
   drag-and-drop of an mp3.
 - One-click **Export to mp4** from the panel (renders the selected scene with audio
   via ffmpeg), or headless `--export out.mp4`.
+- **Auto modes** (Timed / Reactive / Shuffle), a **Random** button, and **favorites**:
+  star scenes (persisted to `~/.veffects_favorites.txt`) and restrict auto-rotation to them.
 - Cinematic post-processing baked into the engine: bloom, chromatic aberration,
   beat-driven camera shake, film grain.
 - Headless **offline render** mode that pipes raw frames to `ffmpeg` for an mp4.
