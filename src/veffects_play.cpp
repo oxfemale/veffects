@@ -48,6 +48,8 @@
 
 // ---- cross-platform dynamic library loading ----
 #if defined(_WIN32)
+  #define NOMINMAX             // keep windows.h from clobbering std::min / std::max
+  #define WIN32_LEAN_AND_MEAN
   #include <windows.h>
   static void* dynOpen(const char* p) { return (void*)LoadLibraryA(p); }
   static void* dynSym(void* h, const char* n) { return (void*)GetProcAddress((HMODULE)h, n); }

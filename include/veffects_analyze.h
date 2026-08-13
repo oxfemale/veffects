@@ -13,6 +13,7 @@
 // features, and fills a VfxData. Optionally returns the decoded PCM for playback.
 
 #pragma once
+#define _USE_MATH_DEFINES        // make MSVC's <math.h>/<cmath> expose M_PI
 #include "minimp3.h"
 #include "minimp3_ex.h"
 
@@ -32,6 +33,10 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 namespace vfxa {
 
