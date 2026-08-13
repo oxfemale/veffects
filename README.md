@@ -7,9 +7,13 @@ code reacting to the music. Every scene is a hot-loadable **plugin**, so the vis
 style is fully extensible.
 
 ![build](../../actions/workflows/ci.yml/badge.svg)
+![platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C)
+![scenes](https://img.shields.io/badge/scenes-28-8A2BE2)
+![license](https://img.shields.io/badge/license-MIT-green)
 
 <p align="center">
-  <img src="docs/screenshots/gui.png" width="78%" alt="veffects GUI">
+  <img src="docs/screenshots/demo.gif" width="72%" alt="veffects scenes reacting to music">
 </p>
 
 <p align="center">
@@ -23,6 +27,31 @@ style is fully extensible.
   <img src="docs/screenshots/microbes.png" width="32%" alt="Microbes">
   <img src="docs/screenshots/nirvana.png" width="32%" alt="Nirvana">
 </p>
+
+## Quick start
+
+```bash
+# macOS
+brew install cmake sdl2 ffmpeg
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel
+./build/bin/veffects_play            # then "Open audio..." and pick a scene
+```
+
+```bash
+# Linux (Debian/Ubuntu)
+sudo apt-get install -y cmake libsdl2-dev ffmpeg
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel
+./build/bin/veffects_play
+```
+
+```powershell
+# Windows (PowerShell) -- SDL2 is fetched & built automatically
+cmake -S . -B build -DVEFFECTS_FETCH_SDL=ON
+cmake --build build --config Release --parallel
+.\build\bin\veffects_play.exe
+```
+
+`ffmpeg` is optional -- only needed for **Export mp4** and the offline `--render` mode.
 
 ## Features
 
@@ -48,7 +77,11 @@ style is fully extensible.
 
 ## The control panel
 
-The Dear ImGui panel is identical on macOS, Linux and Windows (screenshot above):
+<p align="center">
+  <img src="docs/screenshots/gui.png" width="72%" alt="veffects control panel">
+</p>
+
+The Dear ImGui panel is identical on macOS, Linux and Windows:
 
 - **Open audio...** -- load an mp3/wav/flac/midi (or drag one onto the window). It is
   analyzed in-process and starts playing. MIDI is rendered with a small built-in synth.
