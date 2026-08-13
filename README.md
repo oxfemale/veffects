@@ -13,6 +13,11 @@ style is fully extensible.
 ![license](https://img.shields.io/badge/license-MIT-green)
 
 <p align="center">
+  <img src="docs/screenshots/gui.png" width="74%" alt="veffects GUI"><br>
+  <em>The cross-platform control panel (Dear ImGui), over a live scene.</em>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/demo.gif" width="72%" alt="veffects scenes reacting to music">
 </p>
 
@@ -77,11 +82,7 @@ cmake --build build --config Release --parallel
 
 ## The control panel
 
-<p align="center">
-  <img src="docs/screenshots/gui.png" width="72%" alt="veffects control panel">
-</p>
-
-The Dear ImGui panel is identical on macOS, Linux and Windows:
+The Dear ImGui panel (shown at the top) is identical on macOS, Linux and Windows:
 
 - **Open audio...** -- load an mp3/wav/flac/midi (or drag one onto the window). It is
   analyzed in-process and starts playing. MIDI is rendered with a small built-in synth.
