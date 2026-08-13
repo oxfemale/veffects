@@ -1,11 +1,16 @@
 # veffects
 
-**Turn an mp3 into real-time, math-only visuals.** `veffects` analyzes a track into a
-compact `.veffects` "score" of audio features, then a cross-platform player renders
-procedural scenes from it -- no textures, no assets, just code reacting to the music.
-Every scene is a hot-loadable **plugin**, so the visual style is fully extensible.
+**Turn any track (mp3 / wav / flac / midi) into real-time, math-only visuals.**
+`veffects` analyzes a track into a compact `.veffects` "score" of audio features, then a
+cross-platform player renders procedural scenes from it -- no textures, no assets, just
+code reacting to the music. Every scene is a hot-loadable **plugin**, so the visual
+style is fully extensible.
 
 ![build](../../actions/workflows/ci.yml/badge.svg)
+
+<p align="center">
+  <img src="docs/screenshots/gui.png" width="78%" alt="veffects GUI">
+</p>
 
 <p align="center">
   <img src="docs/screenshots/ghost_in_the_shell.png" width="32%" alt="Ghost in the Shell">
@@ -40,6 +45,30 @@ Every scene is a hot-loadable **plugin**, so the visual style is fully extensibl
   beat-driven camera shake, film grain.
 - Headless **offline render** mode that pipes raw frames to `ffmpeg` for an mp4.
 - Builds on **macOS, Linux and Windows** via CMake; CI builds all three.
+
+## The control panel
+
+The Dear ImGui panel is identical on macOS, Linux and Windows (screenshot above):
+
+- **Open audio...** -- load an mp3/wav/flac/midi (or drag one onto the window). It is
+  analyzed in-process and starts playing. MIDI is rendered with a small built-in synth.
+- **Open image...** + **Show image as: 2D / 3D** -- load a jpg/png/bmp (or drop one) and
+  turn it into a world: *2D* (Photo Particles, the picture scatters into music-reactive
+  particles) or *3D* (Image World 3D, an isometric voxel heightmap). Loading an image
+  switches to an image scene automatically.
+- **Scene** dropdown + **Random** -- pick any of the scenes, or jump to a random one.
+  Favorited scenes are marked with a `*`.
+- **Favorite** -- star the current scene; favorites are saved to
+  `~/.veffects_favorites.txt` and restored next launch.
+- **Auto mode** (shown when *Auto* is selected): **Timed** (fixed interval),
+  **Reactive** (scene changes follow the track's energy build-ups and drops), or
+  **Shuffle** (random order). A **Favorites only** toggle limits rotation to your stars.
+- **Mute original audio** -- watch the visuals in silence.
+- **Pause**, a **seek** slider, elapsed/total time and estimated **BPM**.
+- **Export mp4...** -- render the current scene over the whole track (with audio) to an
+  mp4 via ffmpeg, with a progress bar and Cancel.
+
+Keyboard: `1`-`9` pick a scene, `0` auto, `Space` pause, `M` mute, `Esc` quit.
 
 ## Bundled scenes
 
