@@ -21,7 +21,8 @@ Every scene is a hot-loadable **plugin**, so the visual style is fully extensibl
 
 ## Features
 
-- **mp3 -> visuals**, end to end: open a track in the GUI and it analyzes and plays.
+- **Audio -> visuals**, end to end: open a track (**mp3, wav, flac, or midi**) in the
+  GUI and it analyzes and plays. MIDI is rendered with a small built-in synth.
 - A tiny custom **`.veffects`** score format (~9.6 KB/s) -- see [docs/FORMAT.md](docs/FORMAT.md).
 - **Plugin scenes** (`.dylib`/`.so`/`.dll`) discovered at runtime -- add your own by
   dropping a file in `plugins/`. See [docs/PLUGINS.md](docs/PLUGINS.md).
@@ -126,11 +127,12 @@ Outputs land in `build/bin/` (`veffects_gen`, `veffects_play`) and
 ./build/bin/veffects_play
 ```
 
-Then **Open mp3...** (or drag an mp3 onto the window). It analyzes the track and
-starts playing. Use the **Scene** dropdown to switch scenes and the **Mute original
-audio** checkbox to run the visuals without sound. For the image-driven scenes,
-click **Open image...** (or drop a jpg/png/bmp on the window), then pick *Photo
-Particles* or *Image World 3D*. Drag the **seek slider** to scrub, and **Export
+Then **Open audio...** (or drag an mp3/wav/flac/midi onto the window). It analyzes
+the track and starts playing. Use the **Scene** dropdown to switch scenes and the
+**Mute original audio** checkbox to run the visuals without sound. For the
+image-driven scenes, click **Open image...** (or drop a jpg/png/bmp on the window) --
+the view switches to an image scene automatically, and the **Show image as: 2D / 3D**
+buttons toggle between *Photo Particles* and *Image World 3D*. Drag the **seek slider** to scrub, and **Export
 mp4...** renders the current scene (with audio) to a file via ffmpeg. `Space`
 pauses, `M` mutes, `Esc` quits.
 

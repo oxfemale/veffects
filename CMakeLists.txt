@@ -50,7 +50,9 @@ endif()
 set(VEFFECTS_INCLUDES
   "${CMAKE_SOURCE_DIR}/include"
   "${CMAKE_SOURCE_DIR}/third_party/minimp3"
-  "${CMAKE_SOURCE_DIR}/third_party/stb")
+  "${CMAKE_SOURCE_DIR}/third_party/stb"
+  "${CMAKE_SOURCE_DIR}/third_party/dr"
+  "${CMAKE_SOURCE_DIR}/third_party/tml")
 
 # ---------------- analyzer CLI ----------------
 add_executable(veffects_gen src/veffects_gen.cpp)

@@ -1,22 +1,34 @@
-// veffects_analyze.h -- in-process mp3 analysis producing a VfxData score.
+// veffects_analyze.h -- in-process audio decode + analysis producing a VfxData score.
 //
-// Shared by the CLI analyzer (veffects_gen) and the player (for "Open" in the GUI).
+// Supported inputs: mp3 (minimp3), wav (dr_wav), flac (dr_flac), midi (tml + a tiny
+// built-in synth). Shared by the CLI analyzer (veffects_gen) and the player.
+//
 // The including translation unit must define MINIMP3_IMPLEMENTATION exactly once
-// before including this header, e.g.:
+// before including this header:
 //
 //   #define MINIMP3_IMPLEMENTATION
 //   #include "veffects_analyze.h"
 //
-// vfxAnalyzeMp3() decodes the mp3, runs a windowed FFT, extracts audio features,
-// and fills a VfxData. Optionally returns the decoded PCM for playback.
+// vfxAnalyzeFile() decodes the file to PCM, runs a windowed FFT, extracts audio
+// features, and fills a VfxData. Optionally returns the decoded PCM for playback.
 
 #pragma once
 #include "minimp3.h"
 #include "minimp3_ex.h"
+
+#define DR_WAV_IMPLEMENTATION
+#include "dr_wav.h"
+#define DR_FLAC_IMPLEMENTATION
+#include "dr_flac.h"
+#define TML_IMPLEMENTATION
+#include "tml.h"
+
 #include "veffects_format.h"
 
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
+#include <cctype>
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -29,7 +41,6 @@ static const int   VFXA_BANDS    = 32;
 static const float VFXA_FMIN     = 40.f;
 static const float VFXA_FMAX     = 16000.f;
 
-// small radix-2 FFT (in-place, real input)
 inline void vfxa_fft(std::vector<float>& re, std::vector<float>& im) {
     const int n = (int)re.size();
     for (int i = 1, j = 0; i < n; i++) {
@@ -71,33 +82,138 @@ struct VfxAudioPCM {
     int hz = 0, ch = 0;
 };
 
-// Analyze an mp3 into a VfxData. If pcm != nullptr, also returns decoded PCM.
-// Returns false on decode failure (err filled if provided).
-inline bool vfxAnalyzeMp3(const std::string& path, VfxData& out,
-                          VfxAudioPCM* pcm = nullptr, std::string* err = nullptr) {
-    using namespace vfxa;
-    mp3dec_t mp3d;
-    mp3dec_file_info_t info;
+// ---------------- decoders ----------------
+
+inline bool vfxDecodeMp3(const std::string& path, VfxAudioPCM& pcm, std::string* err) {
+    mp3dec_t mp3d; mp3dec_file_info_t info;
     if (mp3dec_load(&mp3d, path.c_str(), &info, NULL, NULL)) {
-        if (err) *err = "cannot decode " + path;
-        return false;
+        if (err) *err = "cannot decode mp3 " + path; return false;
     }
-    const int sr = info.hz, ch = info.channels;
-    const size_t nSamples = info.samples / (ch ? ch : 1);
+    pcm.hz = info.hz; pcm.ch = info.channels;
+    pcm.interleaved.assign(info.buffer, info.buffer + info.samples);
+    free(info.buffer);
+    return true;
+}
+
+inline bool vfxDecodeWav(const std::string& path, VfxAudioPCM& pcm, std::string* err) {
+    unsigned int ch = 0, sr = 0; drwav_uint64 frames = 0;
+    drwav_int16* d = drwav_open_file_and_read_pcm_frames_s16(path.c_str(), &ch, &sr, &frames, NULL);
+    if (!d) { if (err) *err = "cannot decode wav " + path; return false; }
+    pcm.hz = (int)sr; pcm.ch = (int)ch;
+    pcm.interleaved.assign(d, d + (size_t)frames * ch);
+    drwav_free(d, NULL);
+    return true;
+}
+
+inline bool vfxDecodeFlac(const std::string& path, VfxAudioPCM& pcm, std::string* err) {
+    unsigned int ch = 0, sr = 0; drflac_uint64 frames = 0;
+    drflac_int16* d = drflac_open_file_and_read_pcm_frames_s16(path.c_str(), &ch, &sr, &frames, NULL);
+    if (!d) { if (err) *err = "cannot decode flac " + path; return false; }
+    pcm.hz = (int)sr; pcm.ch = (int)ch;
+    pcm.interleaved.assign(d, d + (size_t)frames * ch);
+    drflac_free(d, NULL);
+    return true;
+}
+
+// MIDI: parse events with tml, then render with a tiny built-in synth (simple
+// oscillators + envelopes, channel 9 = noise percussion). No soundfont needed;
+// this is a chiptune-ish rendition, enough to play and to drive the visuals.
+inline bool vfxDecodeMidi(const std::string& path, VfxAudioPCM& pcm, std::string* err) {
+    tml_message* midi = tml_load_filename(path.c_str());
+    if (!midi) { if (err) *err = "cannot load midi " + path; return false; }
+    const int SR = 44100;
+    double lastMs = 0;
+    for (tml_message* m = midi; m; m = m->next) if ((double)m->time > lastMs) lastMs = (double)m->time;
+    double durMs = lastMs + 1500.0;
+    if (durMs > 20.0 * 60.0 * 1000.0) durMs = 20.0 * 60.0 * 1000.0;
+    long total = (long)(durMs / 1000.0 * SR);
+    if (total < SR) total = SR;
+
+    std::vector<float> buf((size_t)total, 0.f);
+    const int MAXCH = 16, MAXKEY = 128;
+    std::vector<int>   startS((size_t)MAXCH * MAXKEY, -1);
+    std::vector<float> startV((size_t)MAXCH * MAXKEY, 0.f);
+
+    auto renderNote = [&](int st, int en, int key, float vel, int ch) {
+        if (st < 0) return;
+        if (en <= st) en = st + SR / 20;
+        float f = 440.f * powf(2.f, (key - 69) / 12.f);
+        int rel = SR / 8, att = SR / 300, len = en - st;
+        bool drum = (ch == 9);
+        for (int i = 0; i < len + rel; i++) {
+            long idx = (long)st + i; if (idx < 0) continue; if (idx >= total) break;
+            float env;
+            if (drum) { int d = SR / 12; if (i >= d) break; env = 1.f - (float)i / d; }
+            else if (i < att) env = (float)i / att;
+            else if (i < len) env = 0.75f;
+            else env = 0.75f * (1.f - (float)(i - len) / rel);
+            float s;
+            if (drum) {
+                unsigned h = (unsigned)(idx * 1103515245u + 12345u);
+                s = ((h >> 9) & 0xffff) / 32767.f - 1.f;
+            } else {
+                float ph = f * ((float)i / SR);
+                float saw = 2.f * (ph - floorf(ph)) - 1.f;
+                s = 0.7f * sinf(6.2831853f * ph) + 0.3f * saw;
+            }
+            buf[(size_t)idx] += s * env * vel * 0.22f;
+        }
+    };
+
+    for (tml_message* m = midi; m; m = m->next) {
+        int ch = m->channel & 15, key = m->key & 127;
+        int s = (int)((double)m->time / 1000.0 * SR);
+        if (m->type == TML_NOTE_ON && m->velocity > 0) {
+            startS[ch * MAXKEY + key] = s; startV[ch * MAXKEY + key] = m->velocity / 127.f;
+        } else if (m->type == TML_NOTE_OFF || (m->type == TML_NOTE_ON && m->velocity == 0)) {
+            int st = startS[ch * MAXKEY + key];
+            if (st >= 0) { renderNote(st, s, key, startV[ch * MAXKEY + key], ch); startS[ch * MAXKEY + key] = -1; }
+        }
+    }
+    for (int c = 0; c < MAXCH; c++) for (int k = 0; k < MAXKEY; k++) {
+        int st = startS[c * MAXKEY + k];
+        if (st >= 0) renderNote(st, (int)total, k, startV[c * MAXKEY + k], c);
+    }
+    tml_free(midi);
+
+    pcm.hz = SR; pcm.ch = 1; pcm.interleaved.resize((size_t)total);
+    for (long i = 0; i < total; i++) {
+        float v = buf[(size_t)i]; v = v < -1 ? -1 : (v > 1 ? 1 : v);
+        pcm.interleaved[(size_t)i] = (short)(v * 32767);
+    }
+    return true;
+}
+
+inline bool vfxHasExt(const std::string& s, const char* ext) {
+    size_t n = strlen(ext);
+    if (s.size() < n) return false;
+    for (size_t i = 0; i < n; i++)
+        if (tolower((unsigned char)s[s.size()-n+i]) != (unsigned char)ext[i]) return false;
+    return true;
+}
+
+// Decode any supported audio file into PCM (dispatch by extension).
+inline bool vfxDecodeFile(const std::string& path, VfxAudioPCM& pcm, std::string* err) {
+    if (vfxHasExt(path, ".wav"))  return vfxDecodeWav(path, pcm, err);
+    if (vfxHasExt(path, ".flac")) return vfxDecodeFlac(path, pcm, err);
+    if (vfxHasExt(path, ".mid") || vfxHasExt(path, ".midi")) return vfxDecodeMidi(path, pcm, err);
+    return vfxDecodeMp3(path, pcm, err);   // default: mp3
+}
+
+// ---------------- analysis ----------------
+
+inline bool vfxAnalyzePCM(const VfxAudioPCM& pcm, VfxData& out) {
+    using namespace vfxa;
+    const int sr = pcm.hz, ch = pcm.ch ? pcm.ch : 1;
+    const size_t nSamples = pcm.interleaved.size() / (size_t)ch;
+    if (nSamples == 0 || sr == 0) return false;
 
     std::vector<float> mono(nSamples);
     for (size_t i = 0; i < nSamples; i++) {
         int acc = 0;
-        for (int c = 0; c < ch; c++) acc += info.buffer[i * ch + c];
+        for (int c = 0; c < ch; c++) acc += pcm.interleaved[i * ch + c];
         mono[i] = (float)acc / (ch * 32768.f);
     }
-    if (pcm) {
-        pcm->hz = sr; pcm->ch = ch;
-        pcm->interleaved.assign(info.buffer, info.buffer + info.samples);
-    }
-    free(info.buffer);
-
-    if (nSamples == 0 || sr == 0) { if (err) *err = "empty audio"; return false; }
 
     const double hop = (double)sr / VFXA_FPS;
     const uint32_t frames = (uint32_t)(nSamples / hop);
@@ -246,4 +362,20 @@ inline bool vfxAnalyzeMp3(const std::string& path, VfxData& out,
     }
     out.bands = std::move(bandsRaw);
     return true;
+}
+
+// Decode + analyze a file. If pcm != nullptr, also returns the decoded PCM.
+inline bool vfxAnalyzeFile(const std::string& path, VfxData& out,
+                           VfxAudioPCM* pcm = nullptr, std::string* err = nullptr) {
+    VfxAudioPCM local;
+    VfxAudioPCM& p = pcm ? *pcm : local;
+    if (!vfxDecodeFile(path, p, err)) return false;
+    if (!vfxAnalyzePCM(p, out)) { if (err) *err = "empty/unsupported audio: " + path; return false; }
+    return true;
+}
+
+// Backward-compatible alias.
+inline bool vfxAnalyzeMp3(const std::string& path, VfxData& out,
+                          VfxAudioPCM* pcm = nullptr, std::string* err = nullptr) {
+    return vfxAnalyzeFile(path, out, pcm, err);
 }

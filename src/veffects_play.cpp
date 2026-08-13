@@ -583,7 +583,7 @@ static int exportMp4(Renderer& R, const std::string& audio, const std::string& o
                      std::atomic<int>* progress = nullptr) {
     if (!R.hasData()) return 2;
     std::string cmd = "ffmpeg -y -loglevel error -f rawvideo -pix_fmt rgb24 -s 640x480 -r 30 -i - ";
-    bool ha = audio.size() > 4 && audio.substr(audio.size() - 4) == ".mp3";
+    bool ha = vfxHasExt(audio, ".mp3") || vfxHasExt(audio, ".wav") || vfxHasExt(audio, ".flac");
     if (ha) cmd += "-i \"" + audio + "\" ";
     cmd += "-c:v libx264 -pix_fmt yuv420p ";
     if (ha) cmd += "-c:a aac -shortest ";
@@ -911,13 +911,13 @@ int main(int argc, char** argv) {
             ImGui::SameLine(); ImGui::TextDisabled("music -> math visuals");
 
             ImGui::BeginDisabled(exporting.load());   // lock controls while exporting
-            if (ImGui::Button("Open mp3...")) {
-                const char* filt[1] = { "*.mp3" };
-                const char* f = tinyfd_openFileDialog("Open an mp3", "", 1, filt, "mp3 audio", 0);
+            if (ImGui::Button("Open audio...")) {
+                const char* filt[5] = { "*.mp3", "*.wav", "*.flac", "*.mid", "*.midi" };
+                const char* f = tinyfd_openFileDialog("Open audio (mp3/wav/flac/midi)", "", 5, filt, "audio", 0);
                 if (f) { startLoad(f); status = "Analyzing..."; }
             }
             ImGui::SameLine();
-            ImGui::TextDisabled("%s", trackName.empty() ? "(no track - drag an mp3 here)" : trackName.c_str());
+            ImGui::TextDisabled("%s", trackName.empty() ? "(no track - drag audio here)" : trackName.c_str());
 
             if (ImGui::Button("Open image...")) {
                 const char* filt[4] = { "*.png", "*.jpg", "*.jpeg", "*.bmp" };
@@ -933,6 +933,14 @@ int main(int argc, char** argv) {
             }
             ImGui::SameLine();
             ImGui::TextDisabled("%s", imageName.empty() ? "(for image scenes)" : imageName.c_str());
+            {   // choose how the loaded image becomes a world
+                ImGui::TextDisabled("Show image as:"); ImGui::SameLine();
+                int pp = findScene(R.plugins, "Photo Particles");
+                int iw = findScene(R.plugins, "Image World 3D");
+                if (ImGui::SmallButton("2D") && pp >= 0) { R.forceScene = pp; sceneSel = pp + 1; }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("3D") && iw >= 0) { R.forceScene = iw; sceneSel = iw + 1; }
+            }
 
             // scene dropdown ("* " marks favorites)
             if (!scenes.empty()) {
