@@ -9,6 +9,15 @@
 // a "Mute original audio" checkbox, and a transport bar. Opening an mp3 analyzes
 // it in-process and plays. There is also a headless --render mode for offline mp4.
 
+#if defined(_WIN32)                // set before ANY header can pull in <windows.h>
+  #ifndef NOMINMAX
+    #define NOMINMAX               // don't clobber std::min / std::max
+  #endif
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+#endif
+
 #define MINIMP3_IMPLEMENTATION
 #include "veffects_analyze.h"     // pulls in minimp3 + veffects_format.h
 #include "veffects_plugin.h"
@@ -48,9 +57,7 @@
 
 // ---- cross-platform dynamic library loading ----
 #if defined(_WIN32)
-  #define NOMINMAX             // keep windows.h from clobbering std::min / std::max
-  #define WIN32_LEAN_AND_MEAN
-  #include <windows.h>
+  #include <windows.h>           // NOMINMAX / WIN32_LEAN_AND_MEAN set at top of file
   static void* dynOpen(const char* p) { return (void*)LoadLibraryA(p); }
   static void* dynSym(void* h, const char* n) { return (void*)GetProcAddress((HMODULE)h, n); }
   static void  dynClose(void* h) { if (h) FreeLibrary((HMODULE)h); }
