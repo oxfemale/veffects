@@ -14,6 +14,14 @@
 
 #pragma once
 #define _USE_MATH_DEFINES        // make MSVC's <math.h>/<cmath> expose M_PI
+#if defined(_WIN32)              // dr_wav/dr_flac pull in <windows.h>; keep it from
+  #ifndef NOMINMAX               // defining min/max macros that break std::min/std::max
+    #define NOMINMAX
+  #endif
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+#endif
 #include "minimp3.h"
 #include "minimp3_ex.h"
 
