@@ -648,7 +648,11 @@ int main(int argc, char** argv) {
     if (!imagePath.empty()) {
         std::vector<unsigned char> px; int w, h;
         if (loadImageFile(imagePath, px, w, h)) { R.setImage(std::move(px), w, h, 3);
-            fprintf(stderr, "image: %s (%dx%d)\n", imagePath.c_str(), w, h); }
+            fprintf(stderr, "image: %s (%dx%d)\n", imagePath.c_str(), w, h);
+            if (sceneName.empty() && R.forceScene < 0) {   // default to an image scene
+                int iw = findScene(R.plugins, "Image World 3D");
+                if (iw >= 0) R.forceScene = iw;
+            } }
         else fprintf(stderr, "warn: cannot load image %s\n", imagePath.c_str());
     }
 
@@ -801,6 +805,17 @@ int main(int argc, char** argv) {
     std::vector<std::string> scenes = sceneItems();
     int sceneSel = (R.forceScene >= 0) ? R.forceScene + 1 : 0;
 
+    // When an image is loaded, jump to an image-driven scene so it visibly does
+    // something (unless the user is already on one).
+    auto switchToImageScene = [&]{
+        int pp = findScene(R.plugins, "Photo Particles");
+        int iw = findScene(R.plugins, "Image World 3D");
+        if (R.forceScene == pp || R.forceScene == iw) return;
+        int target = (iw >= 0) ? iw : pp;
+        if (target >= 0) { R.forceScene = target; sceneSel = target + 1;
+                           status = "Image loaded -> " + R.plugins[target].name; }
+    };
+
     bool run = true;
     while (run) {
         SDL_Event e;
@@ -818,6 +833,7 @@ int main(int argc, char** argv) {
                             R.setImage(std::move(px), w, h, 3);
                             imageName = std::filesystem::path(fp).filename().string();
                             status.clear();
+                            switchToImageScene();
                         } else status = "Cannot load image";
                     } else { startLoad(fp); status = "Analyzing..."; }
                     SDL_free(f);
@@ -911,6 +927,7 @@ int main(int argc, char** argv) {
                     if (loadImageFile(f, px, w, h)) {
                         R.setImage(std::move(px), w, h, 3);
                         imageName = std::filesystem::path(f).filename().string();
+                        switchToImageScene();
                     }
                 }
             }
